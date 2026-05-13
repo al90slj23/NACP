@@ -133,6 +133,18 @@ function renderType(type, t) {
           {t('退款')}
         </Tag>
       );
+    case 51:
+      return (
+        <Tag color='yellow' shape='circle'>
+          {t('已拦截')}
+        </Tag>
+      );
+    case 52:
+      return (
+        <Tag color='red' shape='circle'>
+          {t('客户可见')}
+        </Tag>
+      );
     default:
       return (
         <Tag color='grey' shape='circle'>
