@@ -378,7 +378,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		logger.LogInfo(c, retryLogStr)
 	}
 
-	// NACP: If error is being returned to client, record a client-visible error log (type 9)
+	// NACP: If error is being returned to client, record a client-visible error log (type 52)
+	// This uses the same field collection as processChannelError for complete data
 	if newAPIError != nil && constant.ErrorLogEnabled && types.IsRecordErrorLog(newAPIError) {
 		userId := c.GetInt("id")
 		tokenName := c.GetString("token_name")
@@ -386,11 +387,17 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		tokenId := c.GetInt("token_id")
 		userGroup := c.GetString("group")
 		channelId := c.GetInt("channel_id")
-		other := map[string]interface{}{
-			"error_type":  newAPIError.GetErrorType(),
-			"error_code":  newAPIError.GetErrorCode(),
-			"status_code": newAPIError.StatusCode,
-			"channel_id":  channelId,
+		other := make(map[string]interface{})
+		if c.Request != nil && c.Request.URL != nil {
+			other["request_path"] = c.Request.URL.Path
+		}
+		other["error_type"] = newAPIError.GetErrorType()
+		other["error_code"] = newAPIError.GetErrorCode()
+		other["status_code"] = newAPIError.StatusCode
+		other["channel_id"] = channelId
+		other["channel_name"] = c.GetString("channel_name")
+		other["channel_type"] = c.GetInt("channel_type")
+		other["admin_info"] = map[string]interface{}{
 			"use_channel": useChannel,
 		}
 		startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
