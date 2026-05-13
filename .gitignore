@@ -19,7 +19,7 @@ tiktoken_cache
 .gocache
 .gomodcache/
 .cache
-web/bun.lock
+# web/bun.lock  # NACP: needed for Docker build
 plans
 .claude
 
