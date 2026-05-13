@@ -63,16 +63,33 @@ local_dev() {
     echo "  b) 启动前端 (bun run dev)"
     echo "  c) 同时启动后端+前端"
     echo "  d) 停止本地开发"
+    echo "  e) 启动本地 MySQL"
+    echo "  f) 停止本地 MySQL"
     read -p "选择: " sub_choice
+
+    # Load .env if exists (for SQL_DSN etc.)
+    if [ -f .env ]; then
+        set -a; source .env; set +a
+    fi
+
+    # Default local dev SQL_DSN (uses local Docker MySQL on port 3307)
+    LOCAL_SQL_DSN="nacp_dev:nacp_dev_pass@tcp(localhost:3307)/nacp_dev?charset=utf8mb4&parseTime=True&loc=Local"
+
     case "$sub_choice" in
         a)
             log_info "启动后端 (端口 3000)..."
-            log_info "需要本地 MySQL 或设置 SQL_DSN 环境变量"
-            log_info "按 Ctrl+C 停止"
-            export SQL_DSN="${SQL_DSN:-root:@tcp(localhost:3306)/nacp?charset=utf8mb4&parseTime=True&loc=Local}"
+            if [ -z "$SQL_DSN" ]; then
+                log_info "未配置 SQL_DSN，使用本地 MySQL (端口 3307)"
+                log_info "如未启动本地 MySQL，请先执行选项 e"
+                export SQL_DSN="$LOCAL_SQL_DSN"
+            else
+                log_info "使用 .env 中的 SQL_DSN"
+            fi
             export SESSION_SECRET="${SESSION_SECRET:-local_dev_secret}"
             export MEMORY_CACHE_ENABLED="${MEMORY_CACHE_ENABLED:-true}"
             export ERROR_LOG_ENABLED="${ERROR_LOG_ENABLED:-true}"
+            log_info "SQL_DSN: $SQL_DSN"
+            log_info "按 Ctrl+C 停止"
             go run main.go
             ;;
         b)
@@ -82,19 +99,19 @@ local_dev() {
             ;;
         c)
             log_info "同时启动后端+前端..."
-            log_info "后端: :3000  前端: :5173"
-            log_info "按 Ctrl+C 停止"
-            export SQL_DSN="${SQL_DSN:-root:@tcp(localhost:3306)/nacp?charset=utf8mb4&parseTime=True&loc=Local}"
+            if [ -z "$SQL_DSN" ]; then
+                export SQL_DSN="$LOCAL_SQL_DSN"
+                log_info "使用本地 MySQL (端口 3307)"
+            fi
             export SESSION_SECRET="${SESSION_SECRET:-local_dev_secret}"
             export MEMORY_CACHE_ENABLED="${MEMORY_CACHE_ENABLED:-true}"
             export ERROR_LOG_ENABLED="${ERROR_LOG_ENABLED:-true}"
-            # Start backend in background
+            log_info "后端: :3000  前端: :5173"
+            log_info "按 Ctrl+C 停止"
             go run main.go &
             GO_PID=$!
-            # Start frontend
             (cd web && bun run dev) &
             BUN_PID=$!
-            # Wait for either to exit
             trap "kill $GO_PID $BUN_PID 2>/dev/null; exit" INT TERM
             wait
             ;;
@@ -102,6 +119,19 @@ local_dev() {
             log_info "停止本地开发进程..."
             pkill -f "go run main.go" 2>/dev/null && log_info "后端已停止" || log_warn "后端未运行"
             pkill -f "bun run dev" 2>/dev/null && log_info "前端已停止" || log_warn "前端未运行"
+            ;;
+        e)
+            log_info "启动本地开发 MySQL (端口 3307, 数据存储在 ./data/mysql-dev/)..."
+            docker compose -f docker-compose.dev.yml up -d
+            log_info "等待 MySQL 就绪..."
+            sleep 5
+            docker compose -f docker-compose.dev.yml ps
+            log_info "MySQL 连接信息: nacp_dev:nacp_dev_pass@localhost:3307/nacp_dev"
+            ;;
+        f)
+            log_info "停止本地 MySQL..."
+            docker compose -f docker-compose.dev.yml down
+            log_info "已停止（数据保留在 ./data/mysql-dev/）"
             ;;
         *)
             log_error "未知选项"
