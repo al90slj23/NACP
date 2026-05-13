@@ -52,8 +52,61 @@ show_menu() {
     echo "  5) 停止/重启服务器"
     echo "  6) 紧急部署（本地构建 → push 镜像 → 服务器更新）"
     echo "  7) 运行测试"
+    echo "  0) 本地开发环境"
     echo ""
     echo -e "  ${YELLOW}输入选项编号:${NC}"
+}
+
+# ─── 选项 0: 本地开发环境 ─────────────────────────────────────────────────────
+local_dev() {
+    echo "  a) 启动后端 (go run)"
+    echo "  b) 启动前端 (bun run dev)"
+    echo "  c) 同时启动后端+前端"
+    echo "  d) 停止本地开发"
+    read -p "选择: " sub_choice
+    case "$sub_choice" in
+        a)
+            log_info "启动后端 (端口 3000)..."
+            log_info "需要本地 MySQL 或设置 SQL_DSN 环境变量"
+            log_info "按 Ctrl+C 停止"
+            export SQL_DSN="${SQL_DSN:-root:@tcp(localhost:3306)/nacp?charset=utf8mb4&parseTime=True&loc=Local}"
+            export SESSION_SECRET="${SESSION_SECRET:-local_dev_secret}"
+            export MEMORY_CACHE_ENABLED="${MEMORY_CACHE_ENABLED:-true}"
+            export ERROR_LOG_ENABLED="${ERROR_LOG_ENABLED:-true}"
+            go run main.go
+            ;;
+        b)
+            log_info "启动前端开发服务器 (端口 5173)..."
+            log_info "按 Ctrl+C 停止"
+            (cd web && bun run dev)
+            ;;
+        c)
+            log_info "同时启动后端+前端..."
+            log_info "后端: :3000  前端: :5173"
+            log_info "按 Ctrl+C 停止"
+            export SQL_DSN="${SQL_DSN:-root:@tcp(localhost:3306)/nacp?charset=utf8mb4&parseTime=True&loc=Local}"
+            export SESSION_SECRET="${SESSION_SECRET:-local_dev_secret}"
+            export MEMORY_CACHE_ENABLED="${MEMORY_CACHE_ENABLED:-true}"
+            export ERROR_LOG_ENABLED="${ERROR_LOG_ENABLED:-true}"
+            # Start backend in background
+            go run main.go &
+            GO_PID=$!
+            # Start frontend
+            (cd web && bun run dev) &
+            BUN_PID=$!
+            # Wait for either to exit
+            trap "kill $GO_PID $BUN_PID 2>/dev/null; exit" INT TERM
+            wait
+            ;;
+        d)
+            log_info "停止本地开发进程..."
+            pkill -f "go run main.go" 2>/dev/null && log_info "后端已停止" || log_warn "后端未运行"
+            pkill -f "bun run dev" 2>/dev/null && log_info "前端已停止" || log_warn "前端未运行"
+            ;;
+        *)
+            log_error "未知选项"
+            ;;
+    esac
 }
 
 # ─── 选项 1: 标准部署 ─────────────────────────────────────────────────────────
@@ -169,6 +222,7 @@ main() {
     fi
 
     case "$choice" in
+        0) local_dev ;;
         1) deploy ;;
         2) server_status ;;
         3) server_logs ;;
