@@ -58,14 +58,38 @@ show_menu() {
 }
 
 # ─── 选项 0: 本地开发环境 ─────────────────────────────────────────────────────
+ensure_web_dist() {
+    # web/dist must exist for Go embed to compile
+    if [ ! -d "web/dist" ]; then
+        log_info "web/dist 不存在，首次构建前端..."
+        (cd web && bun install && bun run build)
+        log_info "前端构建完成"
+    fi
+}
+
+ensure_local_mysql() {
+    # Check if local dev MySQL is running
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "nacp-mysql-dev"; then
+        log_info "本地 MySQL 未运行，正在启动..."
+        docker compose -f docker-compose.dev.yml up -d
+        log_info "等待 MySQL 就绪..."
+        sleep 5
+    fi
+}
+
 local_dev() {
-    echo "  a) 启动后端 (go run)"
-    echo "  b) 启动前端 (bun run dev)"
-    echo "  c) 同时启动后端+前端"
-    echo "  d) 停止本地开发"
-    echo "  e) 启动本地 MySQL"
-    echo "  f) 停止本地 MySQL"
-    read -p "选择: " sub_choice
+    local sub_choice="${1:-}"
+
+    if [ -z "$sub_choice" ]; then
+        echo "  a) 启动后端 (go run)"
+        echo "  b) 启动前端 (bun run dev)"
+        echo "  c) 同时启动后端+前端 [默认]"
+        echo "  d) 停止本地开发"
+        echo "  e) 启动本地 MySQL"
+        echo "  f) 停止本地 MySQL"
+        read -p "选择 [c]: " sub_choice
+        sub_choice="${sub_choice:-c}"
+    fi
 
     # Load .env if exists (for SQL_DSN etc.)
     if [ -f .env ]; then
@@ -77,28 +101,29 @@ local_dev() {
 
     case "$sub_choice" in
         a)
+            ensure_web_dist
+            ensure_local_mysql
             log_info "启动后端 (端口 3000)..."
             if [ -z "$SQL_DSN" ]; then
-                log_info "未配置 SQL_DSN，使用本地 MySQL (端口 3307)"
-                log_info "如未启动本地 MySQL，请先执行选项 e"
                 export SQL_DSN="$LOCAL_SQL_DSN"
+                log_info "使用本地 MySQL (端口 3307)"
             else
                 log_info "使用 .env 中的 SQL_DSN"
             fi
             export SESSION_SECRET="${SESSION_SECRET:-local_dev_secret}"
             export MEMORY_CACHE_ENABLED="${MEMORY_CACHE_ENABLED:-true}"
             export ERROR_LOG_ENABLED="${ERROR_LOG_ENABLED:-true}"
-            log_info "SQL_DSN: $SQL_DSN"
             log_info "按 Ctrl+C 停止"
             go run main.go
             ;;
         b)
             log_info "启动前端开发服务器 (端口 5173)..."
             log_info "按 Ctrl+C 停止"
-            (cd web && bun run dev)
+            (cd web && bun install --frozen-lockfile 2>/dev/null; bun run dev)
             ;;
         c)
-            log_info "同时启动后端+前端..."
+            ensure_web_dist
+            ensure_local_mysql
             if [ -z "$SQL_DSN" ]; then
                 export SQL_DSN="$LOCAL_SQL_DSN"
                 log_info "使用本地 MySQL (端口 3307)"
@@ -106,10 +131,12 @@ local_dev() {
             export SESSION_SECRET="${SESSION_SECRET:-local_dev_secret}"
             export MEMORY_CACHE_ENABLED="${MEMORY_CACHE_ENABLED:-true}"
             export ERROR_LOG_ENABLED="${ERROR_LOG_ENABLED:-true}"
-            log_info "后端: :3000  前端: :5173"
+            log_info "启动后端+前端..."
+            log_info "后端: :3000  前端: :5173 (浏览器访问 5173)"
             log_info "按 Ctrl+C 停止"
             go run main.go &
             GO_PID=$!
+            sleep 2
             (cd web && bun run dev) &
             BUN_PID=$!
             trap "kill $GO_PID $BUN_PID 2>/dev/null; exit" INT TERM
@@ -248,7 +275,8 @@ main() {
 
     if [ -z "$choice" ]; then
         show_menu
-        read -r choice
+        read -p "" choice
+        choice="${choice:-0}"
     fi
 
     case "$choice" in
