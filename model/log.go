@@ -46,8 +46,12 @@ const (
 	LogTypeConsume = 2
 	LogTypeManage  = 3
 	LogTypeSystem  = 4
-	LogTypeError   = 5
+	LogTypeError   = 5 // Legacy: all errors (kept for historical data compatibility)
 	LogTypeRefund  = 6
+
+	// NACP: Split error types for better observability
+	LogTypeErrorIntercepted   = 51 // Error intercepted by retry system (client did NOT see this error)
+	LogTypeErrorClientVisible = 52 // Error returned to client (all retries exhausted)
 )
 
 func formatUserLogs(logs []*Log, startIdx int) {
@@ -144,6 +148,12 @@ func RecordTopupLog(userId int, content string, callerIp string, paymentMethod s
 
 func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string, tokenName string, content string, tokenId int, useTimeSeconds int,
 	isStream bool, group string, other map[string]interface{}) {
+	RecordErrorLogWithType(c, LogTypeErrorClientVisible, userId, channelId, modelName, tokenName, content, tokenId, useTimeSeconds, isStream, group, other)
+}
+
+// NACP: RecordErrorLogWithType allows specifying the log type (intercepted vs client-visible)
+func RecordErrorLogWithType(c *gin.Context, logType int, userId int, channelId int, modelName string, tokenName string, content string, tokenId int, useTimeSeconds int,
+	isStream bool, group string, other map[string]interface{}) {
 	logger.LogInfo(c, fmt.Sprintf("record error log: userId=%d, channelId=%d, modelName=%s, tokenName=%s, content=%s", userId, channelId, modelName, tokenName, content))
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
@@ -159,7 +169,7 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 		UserId:           userId,
 		Username:         username,
 		CreatedAt:        common.GetTimestamp(),
-		Type:             LogTypeError,
+		Type:             logType,
 		Content:          content,
 		PromptTokens:     0,
 		CompletionTokens: 0,

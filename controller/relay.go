@@ -377,6 +377,29 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		retryLogStr := fmt.Sprintf("重试：%s", strings.Trim(strings.Join(strings.Fields(fmt.Sprint(useChannel)), "->"), "[]"))
 		logger.LogInfo(c, retryLogStr)
 	}
+
+	// NACP: If error is being returned to client, record a client-visible error log (type 9)
+	if newAPIError != nil && constant.ErrorLogEnabled && types.IsRecordErrorLog(newAPIError) {
+		userId := c.GetInt("id")
+		tokenName := c.GetString("token_name")
+		modelName := c.GetString("original_model")
+		tokenId := c.GetInt("token_id")
+		userGroup := c.GetString("group")
+		channelId := c.GetInt("channel_id")
+		other := map[string]interface{}{
+			"error_type":  newAPIError.GetErrorType(),
+			"error_code":  newAPIError.GetErrorCode(),
+			"status_code": newAPIError.StatusCode,
+			"channel_id":  channelId,
+			"use_channel": useChannel,
+		}
+		startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
+		if startTime.IsZero() {
+			startTime = time.Now()
+		}
+		useTimeSeconds := int(time.Since(startTime).Seconds())
+		model.RecordErrorLogWithType(c, model.LogTypeErrorClientVisible, userId, channelId, modelName, tokenName, newAPIError.MaskSensitiveErrorWithStatusCode(), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
+	}
 }
 
 var upgrader = websocket.Upgrader{
@@ -486,6 +509,11 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 }
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {
+	processChannelErrorWithLogType(c, channelError, err, model.LogTypeErrorIntercepted)
+}
+
+// NACP: processChannelErrorWithLogType allows specifying the error log type
+func processChannelErrorWithLogType(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, errorLogType int) {
 	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, err.Error()))
 
 	// NACP: Drive health state machine on error
@@ -531,7 +559,7 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 			startTime = time.Now()
 		}
 		useTimeSeconds := int(time.Since(startTime).Seconds())
-		model.RecordErrorLog(c, userId, channelId, modelName, tokenName, err.MaskSensitiveErrorWithStatusCode(), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
+		model.RecordErrorLogWithType(c, errorLogType, userId, channelId, modelName, tokenName, err.MaskSensitiveErrorWithStatusCode(), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
 	}
 
 }
