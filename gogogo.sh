@@ -8,7 +8,7 @@
 #   紧急（选项6）: 本地 docker build → push 到 GHCR → 服务器 pull + restart
 # ─────────────────────────────────────────────────────────────────────────────
 
-set -e
+set +e  # Don't exit on error — we handle errors explicitly
 
 # ─── 配置 ─────────────────────────────────────────────────────────────────────
 IMAGE="ghcr.io/al90slj23/nacp:main"
@@ -70,6 +70,22 @@ ensure_web_dist() {
 ensure_local_mysql() {
     # Check if local dev MySQL is running
     if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "nacp-mysql-dev"; then
+        # Check if Docker daemon is running, start if not (macOS)
+        if ! docker info >/dev/null 2>&1; then
+            log_info "Docker 未运行，正在启动 Docker Desktop..."
+            open -a Docker
+            # Wait for Docker to be ready
+            local retries=30
+            while ! docker info >/dev/null 2>&1; do
+                retries=$((retries - 1))
+                if [ $retries -le 0 ]; then
+                    log_error "Docker Desktop 启动超时，请手动启动后重试"
+                    exit 1
+                fi
+                sleep 2
+            done
+            log_info "Docker Desktop 已就绪"
+        fi
         log_info "本地 MySQL 未运行，正在启动..."
         docker compose -f docker-compose.dev.yml up -d
         log_info "等待 MySQL 就绪..."
