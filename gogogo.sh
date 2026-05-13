@@ -32,8 +32,10 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step()  { echo -e "${CYAN}[STEP]${NC} $1"; }
 
 # ─── SSH 辅助 ─────────────────────────────────────────────────────────────────
+SSH_KEY="~/.ssh/al90slj23"
+
 remote_exec() {
-    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${DEPLOY_USER}@${DEPLOY_SERVER}" "$@"
+    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${DEPLOY_USER}@${DEPLOY_SERVER}" "$@"
 }
 
 # ─── 菜单 ─────────────────────────────────────────────────────────────────────
