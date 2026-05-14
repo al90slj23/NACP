@@ -59,11 +59,12 @@ show_menu() {
 
 # ─── 选项 0: 本地开发环境 ─────────────────────────────────────────────────────
 ensure_web_dist() {
-    # web/dist must exist for Go embed to compile
+    # web/dist must exist for Go embed to compile (minimal placeholder is enough)
     if [ ! -d "web/dist" ]; then
-        log_info "web/dist 不存在，首次构建前端..."
-        (cd web && bun install && bun run build)
-        log_info "前端构建完成"
+        log_info "web/dist 不存在，创建占位目录（开发模式使用 Vite dev server）..."
+        mkdir -p web/dist
+        echo "<html><body>Use Vite dev server at :5173</body></html>" > web/dist/index.html
+        log_info "占位目录已创建"
     fi
 }
 
@@ -93,6 +94,17 @@ ensure_local_mysql() {
     fi
 }
 
+# 清理占用端口的进程
+kill_port() {
+    local port=$1
+    local pid=$(lsof -ti :${port} 2>/dev/null)
+    if [ -n "$pid" ]; then
+        log_warn "端口 ${port} 被占用 (PID: ${pid})，正在清理..."
+        kill -9 $pid 2>/dev/null
+        sleep 1
+    fi
+}
+
 local_dev() {
     local sub_choice="${1:-}"
 
@@ -119,6 +131,7 @@ local_dev() {
         a)
             ensure_web_dist
             ensure_local_mysql
+            kill_port 3000
             log_info "启动后端 (端口 3000)..."
             if [ -z "$SQL_DSN" ]; then
                 export SQL_DSN="$LOCAL_SQL_DSN"
@@ -133,13 +146,16 @@ local_dev() {
             go run main.go
             ;;
         b)
-            log_info "启动前端开发服务器 (端口 5173)..."
+            kill_port 5173
+            log_info "启动前端开发服务器 (端口 5173, 热更新)..."
             log_info "按 Ctrl+C 停止"
             (cd web && bun install --frozen-lockfile 2>/dev/null; bun run dev)
             ;;
         c)
             ensure_web_dist
             ensure_local_mysql
+            kill_port 3000
+            kill_port 5173
             if [ -z "$SQL_DSN" ]; then
                 export SQL_DSN="$LOCAL_SQL_DSN"
                 log_info "使用本地 MySQL (端口 3307)"
@@ -147,12 +163,18 @@ local_dev() {
             export SESSION_SECRET="${SESSION_SECRET:-local_dev_secret}"
             export MEMORY_CACHE_ENABLED="${MEMORY_CACHE_ENABLED:-true}"
             export ERROR_LOG_ENABLED="${ERROR_LOG_ENABLED:-true}"
-            log_info "启动后端+前端..."
-            log_info "后端: :3000  前端: :5173 (浏览器访问 5173)"
-            log_info "按 Ctrl+C 停止"
+            log_info "启动后端+前端（热更新模式）..."
+            log_info "后端: :3000 | 前端: :5173 (浏览器访问 http://localhost:5173)"
+            log_info "前端修改即时生效（Vite HMR），后端修改需 Ctrl+C 重启"
+            log_info "按 Ctrl+C 停止所有进程"
+            echo ""
+            # 安装前端依赖（如有新增）
+            (cd web && bun install --frozen-lockfile 2>/dev/null)
+            # 启动后端
             go run main.go &
             GO_PID=$!
             sleep 2
+            # 启动前端 dev server（热更新，改代码即时生效）
             (cd web && bun run dev) &
             BUN_PID=$!
             trap "kill $GO_PID $BUN_PID 2>/dev/null; exit" INT TERM
@@ -162,6 +184,8 @@ local_dev() {
             log_info "停止本地开发进程..."
             pkill -f "go run main.go" 2>/dev/null && log_info "后端已停止" || log_warn "后端未运行"
             pkill -f "bun run dev" 2>/dev/null && log_info "前端已停止" || log_warn "前端未运行"
+            kill_port 3000
+            kill_port 5173
             ;;
         e)
             log_info "启动本地开发 MySQL (端口 3307, 数据存储在 ./data/mysql-dev/)..."

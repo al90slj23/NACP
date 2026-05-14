@@ -52,6 +52,10 @@ const (
 	// NACP: Split error types for better observability
 	LogTypeErrorIntercepted   = 51 // Error intercepted by retry system (client did NOT see this error)
 	LogTypeErrorClientVisible = 52 // Error returned to client (all retries exhausted)
+
+	// NACP: Probe log types for pre-warm/degraded probe tracking
+	LogTypeProbeSuccess = 29 // Probe request succeeded (lightweight health check)
+	LogTypeProbeFailed  = 59 // Probe request failed (timeout or non-2xx)
 )
 
 func formatUserLogs(logs []*Log, startIdx int) {

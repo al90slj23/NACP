@@ -25,6 +25,7 @@ import {
   IllustrationNoResultDark,
 } from '@douyinfe/semi-illustrations';
 import { getLogsColumns } from './UsageLogsColumnDefs';
+import TraceExpandRender from './TraceExpandRender';
 
 const LogsTable = (logsData) => {
   const {
@@ -85,6 +86,9 @@ const LogsTable = (logsData) => {
   }, [compactMode, visibleColumnsList]);
 
   const expandRowRender = (record, index) => {
+    if (record.is_summary === true) {
+      return <TraceExpandRender requestId={record.request_id} />;
+    }
     return <Descriptions data={expandData[record.key]} />;
   };
 
@@ -95,7 +99,8 @@ const LogsTable = (logsData) => {
         expandedRowRender: expandRowRender,
         expandRowByClick: true,
         rowExpandable: (record) =>
-          expandData[record.key] && expandData[record.key].length > 0,
+          record.is_summary === true ||
+          (expandData[record.key] && expandData[record.key].length > 0),
       })}
       dataSource={logs}
       rowKey='key'

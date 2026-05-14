@@ -379,7 +379,10 @@ export const useLogsData = () => {
     let expandDatesLocal = {};
     for (let i = 0; i < logs.length; i++) {
       logs[i].timestamp2string = timestamp2string(logs[i].created_at);
-      logs[i].key = logs[i].id;
+      // Summary rows have id=0, use request_id as key to ensure uniqueness
+      logs[i].key = logs[i].is_summary
+        ? `summary_${logs[i].request_id}`
+        : logs[i].id;
       let other = getLogOther(logs[i].other);
       let expandDataLocal = [];
 
@@ -752,7 +755,7 @@ export const useLogsData = () => {
     let localStartTimestamp = Date.parse(start_timestamp) / 1000;
     let localEndTimestamp = Date.parse(end_timestamp) / 1000;
     if (isAdminUser) {
-      url = `/api/log/?p=${startIdx}&page_size=${pageSize}&type=${currentLogType}&username=${username}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&channel=${channel}&group=${group}&request_id=${request_id}`;
+      url = `/api/log/grouped?p=${startIdx}&page_size=${pageSize}&type=${currentLogType}&username=${username}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&channel=${channel}&group=${group}&request_id=${request_id}`;
     } else {
       url = `/api/log/self/?p=${startIdx}&page_size=${pageSize}&type=${currentLogType}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&group=${group}&request_id=${request_id}`;
     }
@@ -828,7 +831,9 @@ export const useLogsData = () => {
   // Check if any record has expandable content
   const hasExpandableRows = () => {
     return logs.some(
-      (log) => expandData[log.key] && expandData[log.key].length > 0,
+      (log) =>
+        log.is_summary ||
+        (expandData[log.key] && expandData[log.key].length > 0),
     );
   };
 

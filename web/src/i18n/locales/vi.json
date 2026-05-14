@@ -4176,6 +4176,21 @@
     "默认折叠侧边栏": "Mặc định thu gọn thanh bên",
     "默认测试模型": "Mô hình kiểm tra mặc định",
     "默认用户消息": "Xin chào",
-    "默认补全倍率": "Tỷ lệ hoàn thành mặc định"
+    "默认补全倍率": "Tỷ lệ hoàn thành mặc định",
+    "请求链路": "Chuỗi yêu cầu",
+    "尝试渠道数": "Số kênh đã thử",
+    "总耗时": "Tổng thời gian",
+    "总消耗额度": "Tổng hạn mức tiêu thụ",
+    "最终结果": "Kết quả cuối cùng",
+    "已拦截": "Đã chặn",
+    "客户端错误": "Lỗi phía client",
+    "无链路数据": "Không có dữ liệu chuỗi",
+    "HTTP状态码": "Mã trạng thái HTTP",
+    "链路详情": "Chi tiết chuỗi",
+    "Token名称": "Tên token",
+    "成功(重试)": "Thành công (Thử lại)",
+    "失败(重试)": "Thất bại (Thử lại)",
+    "探测成功": "Thăm dò thành công",
+    "探测失败": "Thăm dò thất bại"
   }
 }

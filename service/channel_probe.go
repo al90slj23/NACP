@@ -50,7 +50,8 @@ type ProbeLog struct {
 	Success     bool   `json:"success"`
 	LatencyMs   int64  `json:"latency_ms"`
 	StatusCode  int    `json:"status_code"`
-	Trigger     string `json:"trigger"` // "pre_warm", "degraded_periodic"
+	Trigger     string `json:"trigger"` // "pre_warm", "degraded_probe"
+	Error       string `json:"error"`   // error message for failed probes
 	Timestamp   int64  `json:"timestamp"`
 }
 
@@ -132,7 +133,8 @@ func ProbeChannel(channel *model.Channel, modelName string) *ProbeResult {
 // ProbeNextChannels probes multiple standby channels in parallel.
 // Returns results in the same order as input channels.
 // Used for pre-warming: while retrying channel A, simultaneously check B and C.
-func ProbeNextChannels(channels []*model.Channel, modelName string) []*ProbeResult {
+// requestId links probe logs to the triggering user request for trace grouping.
+func ProbeNextChannels(channels []*model.Channel, modelName string, requestId string) []*ProbeResult {
 	if len(channels) == 0 {
 		return nil
 	}
@@ -148,6 +150,10 @@ func ProbeNextChannels(channels []*model.Channel, modelName string) []*ProbeResu
 			defer wg.Done()
 			results[idx] = ProbeChannel(channel, modelName)
 			// Record probe log for cost tracking
+			var errMsg string
+			if results[idx].Error != nil {
+				errMsg = results[idx].Error.Error()
+			}
 			recordProbeLog(&ProbeLog{
 				ChannelID:   channel.Id,
 				ChannelName: channel.Name,
@@ -156,8 +162,9 @@ func ProbeNextChannels(channels []*model.Channel, modelName string) []*ProbeResu
 				LatencyMs:   results[idx].LatencyMs,
 				StatusCode:  results[idx].StatusCode,
 				Trigger:     "pre_warm",
+				Error:       errMsg,
 				Timestamp:   time.Now().Unix(),
-			})
+			}, requestId)
 		})
 	}
 
@@ -235,9 +242,10 @@ func getProbeAuthHeader(channel *model.Channel) string {
 	}
 }
 
-// recordProbeLog records probe execution for cost tracking.
-// Uses user_id=0 to ensure no billing to any user account.
-func recordProbeLog(probeLog *ProbeLog) {
+// recordProbeLog records probe execution to the logs table.
+// Uses gopool.Go for async write to avoid blocking the probe/retry flow.
+// user_id=0, quota=0 ensures no billing impact.
+func recordProbeLog(probeLog *ProbeLog, requestId string) {
 	if probeLog == nil {
 		return
 	}
@@ -246,7 +254,49 @@ func recordProbeLog(probeLog *ProbeLog) {
 		common.SysLog(fmt.Sprintf("NACP probe: channel=#%d model=%s success=%v latency=%dms trigger=%s",
 			probeLog.ChannelID, probeLog.ModelName, probeLog.Success, probeLog.LatencyMs, probeLog.Trigger))
 	}
-	// TODO: In future, record to a dedicated probe_logs table or existing logs table with probe marker
+
+	// Determine log type
+	logType := model.LogTypeProbeSuccess // 29
+	if !probeLog.Success {
+		logType = model.LogTypeProbeFailed // 59
+	}
+
+	// Build Other field
+	other := map[string]interface{}{
+		"probe_trigger": probeLog.Trigger,
+		"admin_info": map[string]interface{}{
+			"status_code":  probeLog.StatusCode,
+			"latency_ms":   probeLog.LatencyMs,
+			"channel_name": probeLog.ChannelName,
+		},
+	}
+	if !probeLog.Success && probeLog.Error != "" {
+		other["error"] = probeLog.Error
+	}
+	otherStr := common.MapToJsonStr(other)
+
+	// Use time in seconds (milliseconds / 1000, round up)
+	useTimeSec := int((probeLog.LatencyMs + 999) / 1000)
+
+	log := &model.Log{
+		UserId:    0, // probe cost not billed to any user
+		Username:  "",
+		CreatedAt: probeLog.Timestamp,
+		Type:      logType,
+		Content:   fmt.Sprintf("probe %s channel #%d", probeLog.ModelName, probeLog.ChannelID),
+		ModelName: probeLog.ModelName,
+		Quota:     0,
+		ChannelId: probeLog.ChannelID,
+		UseTime:   useTimeSec,
+		RequestId: requestId,
+		Other:     otherStr,
+	}
+
+	gopool.Go(func() {
+		if err := model.LOG_DB.Create(log).Error; err != nil {
+			common.SysLog("failed to record probe log: " + err.Error())
+		}
+	})
 }
 
 // probeDegradedChannels probes all channels in Degraded state.
@@ -290,6 +340,10 @@ func probeDegradedChannels() {
 		result := ProbeChannel(channel, modelName)
 		OnProbeResult(id, result.Success)
 
+		var errMsg string
+		if result.Error != nil {
+			errMsg = result.Error.Error()
+		}
 		recordProbeLog(&ProbeLog{
 			ChannelID:   id,
 			ChannelName: channel.Name,
@@ -297,9 +351,10 @@ func probeDegradedChannels() {
 			Success:     result.Success,
 			LatencyMs:   result.LatencyMs,
 			StatusCode:  result.StatusCode,
-			Trigger:     "degraded_periodic",
+			Trigger:     "degraded_probe",
+			Error:       errMsg,
 			Timestamp:   time.Now().Unix(),
-		})
+		}, "") // empty requestId — degraded probe not linked to any user request
 
 		// Small delay between probes to avoid burst
 		time.Sleep(500 * time.Millisecond)

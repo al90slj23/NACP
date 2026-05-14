@@ -276,7 +276,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				}
 			}
 			if len(preWarmChannels) > 0 {
-				preWarmResults = service.ProbeNextChannels(preWarmChannels, relayInfo.OriginModelName)
+				preWarmResults = service.ProbeNextChannels(preWarmChannels, relayInfo.OriginModelName, requestId)
 			}
 		}()
 
@@ -307,6 +307,34 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			}
 			newAPIError = service.NormalizeViolationFeeError(newAPIError)
 			relayInfo.LastError = newAPIError
+
+			// NACP: Record intercepted error for same-channel retry (type=51)
+			if constant.ErrorLogEnabled && types.IsRecordErrorLog(newAPIError) {
+				sameChRetryOther := map[string]interface{}{
+					"retry_type":  "same_channel",
+					"retry_index": retry + 1,
+					"admin_info": map[string]interface{}{
+						"status_code":  newAPIError.StatusCode,
+						"error_type":   newAPIError.GetErrorType(),
+						"error_code":   newAPIError.GetErrorCode(),
+						"channel_id":   channel.Id,
+						"channel_name": channel.Name,
+					},
+				}
+				userId := c.GetInt("id")
+				tokenName := c.GetString("token_name")
+				modelName := c.GetString("original_model")
+				tokenId := c.GetInt("token_id")
+				userGroup := c.GetString("group")
+				startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
+				useTimeSeconds := int(time.Since(startTime).Seconds())
+				model.RecordErrorLogWithType(c, model.LogTypeErrorIntercepted, userId,
+					channel.Id, modelName, tokenName,
+					newAPIError.MaskSensitiveErrorWithStatusCode(),
+					tokenId, useTimeSeconds,
+					common.GetContextKeyBool(c, constant.ContextKeyIsStream),
+					userGroup, sameChRetryOther)
+			}
 		}
 
 		if sameChannelSuccess {

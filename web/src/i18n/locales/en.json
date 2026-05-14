@@ -3787,6 +3787,25 @@
     "见上方动态计费详情": "See dynamic pricing details above",
     "含时间条件": "Time rules",
     "含请求条件": "Request rules",
-    "（当前仅支持易支付接口，默认使用上方服务器地址作为回调地址！）": "(Currently only supports Epay interface, the default callback address is the server address above!)"
+    "（当前仅支持易支付接口，默认使用上方服务器地址作为回调地址！）": "(Currently only supports Epay interface, the default callback address is the server address above!)",
+    "请求链路": "Request Traces",
+    "请求时间": "Request Time",
+    "尝试渠道数": "Channels Tried",
+    "总耗时": "Total Duration",
+    "总消耗额度": "Total Quota Used",
+    "最终结果": "Final Result",
+    "已拦截": "Intercepted",
+    "客户端错误": "Client Error",
+    "无链路数据": "No trace data",
+    "渠道ID": "Channel ID",
+    "渠道名称": "Channel Name",
+    "HTTP状态码": "HTTP Status Code",
+    "耗时": "Duration",
+    "链路详情": "Trace Details",
+    "Token名称": "Token Name",
+    "成功(重试)": "Success (Retry)",
+    "失败(重试)": "Failed (Retry)",
+    "探测成功": "Probe Success",
+    "探测失败": "Probe Failed"
   }
 }

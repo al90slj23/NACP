@@ -6,6 +6,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -168,4 +169,67 @@ func DeleteHistoryLogs(c *gin.Context) {
 		"data":    count,
 	})
 	return
+}
+
+// GetGroupedLogs 处理 GET /api/log/grouped
+// 返回按 request_id 分组的混合日志列表（摘要行 + 普通行）
+func GetGroupedLogs(c *gin.Context) {
+	// Parse page parameter, default 1
+	page, _ := strconv.Atoi(c.Query("p"))
+	if page < 1 {
+		page = 1
+	}
+
+	// Parse page_size parameter, default 20, range 1-100
+	pageSize, _ := strconv.Atoi(c.Query("page_size"))
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+
+	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	logType, _ := strconv.Atoi(c.Query("type"))
+	modelName := c.Query("model_name")
+	username := c.Query("username")
+	tokenName := c.Query("token_name")
+	channel, _ := strconv.Atoi(c.Query("channel"))
+	group := c.Query("group")
+	requestId := c.Query("request_id")
+
+	params := service.GroupedLogParams{
+		Page:           page,
+		PageSize:       pageSize,
+		StartTimestamp: startTimestamp,
+		EndTimestamp:   endTimestamp,
+		LogType:        logType,
+		ModelName:      modelName,
+		Username:       username,
+		TokenName:      tokenName,
+		Channel:        channel,
+		Group:          group,
+		RequestId:      requestId,
+	}
+
+	items, total, err := service.GetGroupedLogs(params)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "查询失败",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data": gin.H{
+			"page":      page,
+			"page_size": pageSize,
+			"total":     total,
+			"items":     items,
+		},
+	})
 }

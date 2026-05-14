@@ -25,6 +25,12 @@ var commonFalseVal string
 var logKeyCol string
 var logGroupCol string
 
+// GetLogGroupCol returns the properly quoted column name for the "group"
+// reserved word in the log database (varies by DB engine).
+func GetLogGroupCol() string {
+	return logGroupCol
+}
+
 func initCol() {
 	// init common column names
 	if common.UsingPostgreSQL {

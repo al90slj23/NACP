@@ -139,6 +139,18 @@ function renderType(type, t) {
           {t('已拦截')}
         </Tag>
       );
+    case 20:
+      return (
+        <Tag color='green' shape='circle'>
+          {t('成功(重试)')}
+        </Tag>
+      );
+    case 50:
+      return (
+        <Tag color='red' shape='circle'>
+          {t('失败(重试)')}
+        </Tag>
+      );
     case 52:
       return (
         <Tag color='red' shape='circle'>
@@ -506,6 +518,29 @@ export const getLogsColumns = ({
       title: t('渠道'),
       dataIndex: 'channel',
       render: (text, record, index) => {
+        // Summary row: render channel_path as colored Tags joined by "→"
+        if (record.is_summary && record.channel_path) {
+          const ids = record.channel_path.split('→');
+          return (
+            <Space>
+              {ids.map((id, i) => (
+                <React.Fragment key={i}>
+                  {i > 0 && <span style={{ color: '#999' }}>→</span>}
+                  <Tag
+                    color={colors[parseInt(id) % colors.length]}
+                    shape='circle'
+                  >
+                    {id}
+                  </Tag>
+                </React.Fragment>
+              ))}
+            </Space>
+          );
+        }
+        if (record.is_summary) {
+          return <span>-</span>;
+        }
+
         let isMultiKey = false;
         let multiKeyIndex = -1;
         let content = t('渠道') + `：${record.channel}`;
@@ -534,7 +569,9 @@ export const getLogsColumns = ({
           (record.type === 0 ||
             record.type === 2 ||
             record.type === 5 ||
-            record.type === 6) ? (
+            record.type === 6 ||
+            record.type === 51 ||
+            record.type === 52) ? (
           <Space>
             <span style={{ position: 'relative', display: 'inline-block' }}>
               <Tooltip content={record.channel_name || t('未知渠道')}>
@@ -628,7 +665,9 @@ export const getLogsColumns = ({
         return record.type === 0 ||
           record.type === 2 ||
           record.type === 5 ||
-          record.type === 6 ? (
+          record.type === 6 ||
+          record.type === 51 ||
+          record.type === 52 ? (
           <div>
             <Tag
               color='grey'
@@ -655,7 +694,9 @@ export const getLogsColumns = ({
           record.type === 0 ||
           record.type === 2 ||
           record.type === 5 ||
-          record.type === 6
+          record.type === 6 ||
+          record.type === 51 ||
+          record.type === 52
         ) {
           if (record.group) {
             return <>{renderGroup(record.group)}</>;
@@ -699,7 +740,9 @@ export const getLogsColumns = ({
         return record.type === 0 ||
           record.type === 2 ||
           record.type === 5 ||
-          record.type === 6 ? (
+          record.type === 6 ||
+          record.type === 51 ||
+          record.type === 52 ? (
           <>{renderModelName(record, copyText, t)}</>
         ) : (
           <></>
@@ -711,7 +754,7 @@ export const getLogsColumns = ({
       title: t('用时/首字'),
       dataIndex: 'use_time',
       render: (text, record, index) => {
-        if (!(record.type === 2 || record.type === 5)) {
+        if (!(record.type === 2 || record.type === 5 || record.type === 51 || record.type === 52)) {
           return <></>;
         }
         if (record.is_stream) {
@@ -769,7 +812,9 @@ export const getLogsColumns = ({
         return record.type === 0 ||
           record.type === 2 ||
           record.type === 5 ||
-          record.type === 6 ? (
+          record.type === 6 ||
+          record.type === 51 ||
+          record.type === 52 ? (
           <div
             style={{
               display: 'inline-flex',
@@ -806,7 +851,9 @@ export const getLogsColumns = ({
           (record.type === 0 ||
             record.type === 2 ||
             record.type === 5 ||
-            record.type === 6) ? (
+            record.type === 6 ||
+            record.type === 51 ||
+            record.type === 52) ? (
           <>{<span> {text} </span>}</>
         ) : (
           <></>
@@ -823,7 +870,9 @@ export const getLogsColumns = ({
             record.type === 0 ||
             record.type === 2 ||
             record.type === 5 ||
-            record.type === 6
+            record.type === 6 ||
+            record.type === 51 ||
+            record.type === 52
           )
         ) {
           return <></>;
@@ -860,6 +909,8 @@ export const getLogsColumns = ({
         const showIp =
           (record.type === 2 ||
             record.type === 5 ||
+            record.type === 51 ||
+            record.type === 52 ||
             (isAdminUser && record.type === 1)) &&
           text;
         return showIp ? (

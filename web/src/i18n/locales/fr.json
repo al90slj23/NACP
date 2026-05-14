@@ -3642,6 +3642,25 @@
     "默认折叠侧边栏": "Réduire la barre latérale par défaut",
     "默认测试模型": "Modèle de test par défaut",
     "默认用户消息": "Bonjour",
-    "默认补全倍率": "Taux de complétion par défaut"
+    "默认补全倍率": "Taux de complétion par défaut",
+    "请求链路": "Traces de requêtes",
+    "请求时间": "Heure de la requête",
+    "尝试渠道数": "Canaux essayés",
+    "总耗时": "Durée totale",
+    "总消耗额度": "Quota total consommé",
+    "最终结果": "Résultat final",
+    "已拦截": "Intercepté",
+    "客户端错误": "Erreur client",
+    "无链路数据": "Aucune donnée de trace",
+    "渠道ID": "ID du canal",
+    "渠道名称": "Nom du canal",
+    "HTTP状态码": "Code HTTP",
+    "耗时": "Durée",
+    "链路详情": "Détails de la trace",
+    "Token名称": "Nom du jeton",
+    "成功(重试)": "Succès (Réessai)",
+    "失败(重试)": "Échec (Réessai)",
+    "探测成功": "Sonde réussie",
+    "探测失败": "Sonde échouée"
   }
 }

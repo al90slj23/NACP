@@ -55,6 +55,7 @@ const Dashboard = lazy(() => import('./pages/Dashboard'));
 const About = lazy(() => import('./pages/About'));
 const UserAgreement = lazy(() => import('./pages/UserAgreement'));
 const PrivacyPolicy = lazy(() => import('./pages/PrivacyPolicy'));
+const TracesPage = lazy(() => import('./pages/Trace/index'));
 
 function DynamicOAuth2Callback() {
   const { provider } = useParams();
@@ -128,6 +129,16 @@ function App() {
           element={
             <AdminRoute>
               <Subscription />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path='/console/traces'
+          element={
+            <AdminRoute>
+              <Suspense fallback={<Loading></Loading>}>
+                <TracesPage />
+              </Suspense>
             </AdminRoute>
           }
         />
