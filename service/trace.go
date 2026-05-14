@@ -36,16 +36,24 @@ type TraceSummary struct {
 
 // TraceStep 链路步骤 DTO
 type TraceStep struct {
-	Id          int    `json:"id"`
-	ChannelId   int    `json:"channel_id"`
-	ChannelName string `json:"channel_name"`
-	Type        int    `json:"type"`
-	StatusCode  *int   `json:"status_code"`
-	UseTime     int    `json:"use_time"`
-	ModelName   string `json:"model_name"`
-	Quota       int    `json:"quota"`
-	CreatedAt   int64  `json:"created_at"`
-	Other       string `json:"other,omitempty"`
+	Id               int    `json:"id"`
+	ChannelId        int    `json:"channel_id"`
+	ChannelName      string `json:"channel_name"`
+	Type             int    `json:"type"`
+	StatusCode       *int   `json:"status_code"`
+	UseTime          int    `json:"use_time"`
+	ModelName        string `json:"model_name"`
+	Username         string `json:"username"`
+	TokenName        string `json:"token_name"`
+	PromptTokens     int    `json:"prompt_tokens"`
+	CompletionTokens int    `json:"completion_tokens"`
+	Quota            int    `json:"quota"`
+	Group            string `json:"group"`
+	Ip               string `json:"ip"`
+	IsStream         bool   `json:"is_stream"`
+	Content          string `json:"content"`
+	CreatedAt        int64  `json:"created_at"`
+	Other            string `json:"other,omitempty"`
 }
 
 // TraceDetail 链路详情 DTO
@@ -187,16 +195,20 @@ type traceLogRow struct {
 	TokenName        string `gorm:"column:token_name"`
 	PromptTokens     int    `gorm:"column:prompt_tokens"`
 	CompletionTokens int    `gorm:"column:completion_tokens"`
+	Group            string `gorm:"column:group_val"`
+	Ip               string `gorm:"column:ip"`
+	IsStream         bool   `gorm:"column:is_stream"`
+	Content          string `gorm:"column:content"`
 }
 
 // GetTraceDetail queries the full trace detail for a given request_id.
 func GetTraceDetail(requestId string) (*TraceDetail, error) {
 	var rows []traceLogRow
 	err := model.LOG_DB.Table("logs").
-		Select("id, channel_id, type, use_time, model_name, quota, created_at, other, username, token_name, prompt_tokens, completion_tokens").
+		Select("id, channel_id, type, use_time, model_name, quota, created_at, other, username, token_name, prompt_tokens, completion_tokens, "+logGroupCol()+" AS group_val, ip, is_stream, content").
 		Where("request_id = ?", requestId).
 		Where("type IN (2, 5, 51, 52, 29, 59)").
-		Order("created_at ASC").
+		Order("created_at ASC, id ASC").
 		Limit(100).
 		Find(&rows).Error
 	if err != nil {
@@ -269,16 +281,24 @@ func GetTraceDetail(requestId string) (*TraceDetail, error) {
 		statusCode := parseStatusCodeFromOther(row.Other)
 
 		step := TraceStep{
-			Id:          row.Id,
-			ChannelId:   row.ChannelId,
-			ChannelName: channelMap[row.ChannelId],
-			Type:        row.Type,
-			StatusCode:  statusCode,
-			UseTime:     row.UseTime,
-			ModelName:   row.ModelName,
-			Quota:       row.Quota,
-			CreatedAt:   row.CreatedAt,
-			Other:       row.Other,
+			Id:               row.Id,
+			ChannelId:        row.ChannelId,
+			ChannelName:      channelMap[row.ChannelId],
+			Type:             row.Type,
+			StatusCode:       statusCode,
+			UseTime:          row.UseTime,
+			ModelName:        row.ModelName,
+			Username:         row.Username,
+			TokenName:        row.TokenName,
+			PromptTokens:     row.PromptTokens,
+			CompletionTokens: row.CompletionTokens,
+			Quota:            row.Quota,
+			Group:            row.Group,
+			Ip:               row.Ip,
+			IsStream:         row.IsStream,
+			Content:          row.Content,
+			CreatedAt:        row.CreatedAt,
+			Other:            row.Other,
 		}
 		detail.Steps = append(detail.Steps, step)
 	}

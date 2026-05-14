@@ -30,11 +30,13 @@ type GroupedLogParams struct {
 type GroupedLogItem struct {
 	// 通用字段（两种行都有）
 	Id               int    `json:"id"`
+	UserId           int    `json:"user_id"`
 	Type             int    `json:"type"`
 	CreatedAt        int64  `json:"created_at"`
 	ModelName        string `json:"model_name"`
 	Username         string `json:"username"`
 	TokenName        string `json:"token_name"`
+	TokenId          int    `json:"token_id"`
 	Quota            int    `json:"quota"`
 	PromptTokens     int    `json:"prompt_tokens"`
 	CompletionTokens int    `json:"completion_tokens"`
@@ -43,9 +45,11 @@ type GroupedLogItem struct {
 	ChannelName      string `json:"channel_name"`
 	RequestId        string `json:"request_id"`
 	Group            string `json:"group"`
+	Ip               string `json:"ip"`
 	Other            string `json:"other"`
 	IsStream         bool   `json:"is_stream"`
 	Content          string `json:"content"`
+	SortAt           int64  `json:"-"`
 
 	// 摘要行专用字段（普通行为零值）
 	ChannelPath   string `json:"channel_path,omitempty"`
@@ -96,21 +100,35 @@ func applyCommonFilters(tx *gorm.DB, params GroupedLogParams) *gorm.DB {
 		tx = tx.Where("channel_id = ?", params.Channel)
 	}
 	if params.Group != "" {
-		tx = tx.Where(model.GetLogGroupCol()+" = ?", params.Group)
+		tx = tx.Where(logGroupCol()+" = ?", params.Group)
 	}
 	return tx
 }
 
+func logGroupCol() string {
+	col := model.GetLogGroupCol()
+	if col != "" {
+		return col
+	}
+	if common.UsingPostgreSQL {
+		return `"group"`
+	}
+	return "`group`"
+}
 
 // traceSummaryRow is the raw row scanned from the GROUP BY aggregation query
 // for grouped log listing.
 type groupedTraceSummaryRow struct {
+	Id                    int    `gorm:"column:id"`
 	RequestId             string `gorm:"column:request_id"`
 	CreatedAt             int64  `gorm:"column:created_at"`
 	MaxCreatedAt          int64  `gorm:"column:max_created_at"`
+	UserId                int    `gorm:"column:user_id"`
 	ModelName             string `gorm:"column:model_name"`
 	Username              string `gorm:"column:username"`
 	TokenName             string `gorm:"column:token_name"`
+	TokenId               int    `gorm:"column:token_id"`
+	ChannelId             int    `gorm:"column:channel_id"`
 	ChannelCount          int    `gorm:"column:channel_count"`
 	HasSuccess            int    `gorm:"column:has_success"`
 	TotalQuota            int    `gorm:"column:total_quota"`
@@ -119,14 +137,18 @@ type groupedTraceSummaryRow struct {
 	LogCount              int    `gorm:"column:log_count"`
 	HasError              int    `gorm:"column:has_error"`
 	Group                 string `gorm:"column:group_val"`
+	Ip                    string `gorm:"column:ip"`
+	Other                 string `gorm:"column:other"`
+	HasStream             int    `gorm:"column:has_stream"`
+	Content               string `gorm:"column:content"`
 }
 
 // GetGroupedLogs returns a mixed list of summary rows and normal rows,
 // sorted by created_at DESC with pagination.
 func GetGroupedLogs(params GroupedLogParams) ([]GroupedLogItem, int64, error) {
-	// Special branch: RequestId non-empty → flat mode
+	// Special branch: RequestId non-empty → keep retry traces grouped, keep normal requests flat.
 	if params.RequestId != "" {
-		return getFlatLogsForRequestId(params)
+		return getLogsForRequestId(params)
 	}
 
 	// Special branch: LogType=2 → only normal consume rows (no retry activity)
@@ -148,7 +170,7 @@ func GetGroupedLogs(params GroupedLogParams) ([]GroupedLogItem, int64, error) {
 	var summaryRows []groupedTraceSummaryRow
 	var summaryTotal int64
 
-	summaryTx := traceSummaryQuery(params, retryReqIds)
+	summaryTx := traceSummaryQuery(retryReqIds)
 
 	// Count summaries
 	countTx := model.LOG_DB.Table("(?) AS sub", summaryTx).Count(&summaryTotal)
@@ -170,8 +192,8 @@ func GetGroupedLogs(params GroupedLogParams) ([]GroupedLogItem, int64, error) {
 	fetchSize := offset + params.PageSize
 
 	// Fetch summary rows
-	if err := traceSummaryQuery(params, retryReqIds).
-		Order("created_at DESC").
+	if err := traceSummaryQuery(retryReqIds).
+		Order("max_created_at DESC").
 		Limit(fetchSize).
 		Find(&summaryRows).Error; err != nil {
 		return nil, 0, err
@@ -202,7 +224,38 @@ func GetGroupedLogs(params GroupedLogParams) ([]GroupedLogItem, int64, error) {
 	return items, total, nil
 }
 
-// getFlatLogsForRequestId returns all logs for a specific request_id (flat mode, no grouping).
+func getLogsForRequestId(params GroupedLogParams) ([]GroupedLogItem, int64, error) {
+	var retryCount int64
+	err := model.LOG_DB.Model(&model.Log{}).
+		Where("request_id = ?", params.RequestId).
+		Where("type IN (51, 52, 29, 59)").
+		Count(&retryCount).Error
+	if err != nil {
+		return nil, 0, err
+	}
+	if retryCount > 0 {
+		return getSummaryLogsForRequestId(params)
+	}
+	return getFlatLogsForRequestId(params)
+}
+
+func getSummaryLogsForRequestId(params GroupedLogParams) ([]GroupedLogItem, int64, error) {
+	summaryTx := traceSummaryQueryForIds([]string{params.RequestId})
+
+	var row groupedTraceSummaryRow
+	err := summaryTx.First(&row).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return []GroupedLogItem{}, 0, nil
+		}
+		return nil, 0, err
+	}
+
+	channelPaths, _ := getChannelPaths([]string{row.RequestId})
+	return []GroupedLogItem{summaryRowToGroupedItem(row, channelPaths)}, 1, nil
+}
+
+// getFlatLogsForRequestId returns all non-retry logs for a specific request_id.
 func getFlatLogsForRequestId(params GroupedLogParams) ([]GroupedLogItem, int64, error) {
 	tx := model.LOG_DB.Where("request_id = ?", params.RequestId)
 	if params.StartTimestamp != 0 {
@@ -280,13 +333,14 @@ func getSummaryLogsWithType(params GroupedLogParams) ([]GroupedLogItem, int64, e
 	if err := subQuery.Pluck("request_id", &targetReqIds).Error; err != nil {
 		return nil, 0, err
 	}
+	targetReqIds = filterTraceRequestIdsByCommonFilters(params, targetReqIds)
 
 	if len(targetReqIds) == 0 {
 		return []GroupedLogItem{}, 0, nil
 	}
 
 	// Build summary query for these specific request_ids
-	summaryTx := traceSummaryQueryForIds(params, targetReqIds)
+	summaryTx := traceSummaryQueryForIds(targetReqIds)
 
 	var total int64
 	countTx := model.LOG_DB.Table("(?) AS sub", summaryTx).Count(&total)
@@ -296,7 +350,7 @@ func getSummaryLogsWithType(params GroupedLogParams) ([]GroupedLogItem, int64, e
 
 	offset := (params.Page - 1) * params.PageSize
 	var summaryRows []groupedTraceSummaryRow
-	if err := summaryTx.Order("created_at DESC").
+	if err := summaryTx.Order("max_created_at DESC").
 		Limit(params.PageSize).
 		Offset(offset).
 		Find(&summaryRows).Error; err != nil {
@@ -317,8 +371,9 @@ func getSummaryLogsWithType(params GroupedLogParams) ([]GroupedLogItem, int64, e
 	return items, total, nil
 }
 
-// getRetryRequestIds returns all request_ids that have retry activity (type IN 51, 52, 29, 59).
-// Applies time range filters from params.
+// getRetryRequestIds returns request_ids that have retry activity and match the
+// current list filters. The returned ids are candidates only; summary rows are
+// later aggregated from the full trace so child fields are not cut apart.
 func getRetryRequestIds(params GroupedLogParams) []string {
 	tx := model.LOG_DB.Table("logs").
 		Select("DISTINCT request_id").
@@ -333,95 +388,90 @@ func getRetryRequestIds(params GroupedLogParams) []string {
 
 	var retryReqIds []string
 	tx.Pluck("request_id", &retryReqIds)
-	return retryReqIds
+	return filterTraceRequestIdsByCommonFilters(params, retryReqIds)
 }
 
-// traceSummaryQuery builds the GROUP BY aggregation query for request_ids with retry activity.
-func traceSummaryQuery(params GroupedLogParams, retryReqIds []string) *gorm.DB {
-	if len(retryReqIds) == 0 {
-		// No retry request_ids → return empty result query
-		return model.LOG_DB.Table("logs").
-			Select("request_id, 0 AS created_at, 0 AS max_created_at, '' AS model_name, '' AS username, '' AS token_name, 0 AS channel_count, 0 AS has_success, 0 AS total_quota, 0 AS total_prompt_tokens, 0 AS total_completion_tokens, 0 AS log_count, 0 AS has_error, '' AS group_val").
-			Where("1 = 0")
+func filterTraceRequestIdsByCommonFilters(params GroupedLogParams, reqIds []string) []string {
+	if len(reqIds) == 0 {
+		return reqIds
 	}
+	tx := model.LOG_DB.Table("logs").
+		Select("DISTINCT request_id").
+		Where("request_id IN ?", reqIds).
+		Where("type IN (2, 5, 51, 52, 29, 59)")
+	tx = applyCommonFilters(tx, params)
 
-	selectSQL := `
+	var filtered []string
+	tx.Pluck("request_id", &filtered)
+	return filtered
+}
+
+func emptyTraceSummaryQuery() *gorm.DB {
+	return model.LOG_DB.Table("logs").
+		Select(emptyTraceSummarySelectSQL()).
+		Where("1 = 0")
+}
+
+func emptyTraceSummarySelectSQL() string {
+	return "0 AS id, '' AS request_id, 0 AS created_at, 0 AS max_created_at, 0 AS user_id, '' AS model_name, '' AS username, '' AS token_name, 0 AS token_id, 0 AS channel_id, 0 AS channel_count, 0 AS has_success, 0 AS total_quota, 0 AS total_prompt_tokens, 0 AS total_completion_tokens, 0 AS log_count, 0 AS has_error, '' AS group_val, '' AS ip, '' AS other, 0 AS has_stream, '' AS content"
+}
+
+func traceSummarySelectSQL() string {
+	groupCol := logGroupCol()
+	return `
+		MAX(id) AS id,
 		request_id,
 		MIN(created_at) AS created_at,
 		MAX(created_at) AS max_created_at,
-		model_name,
-		username,
-		token_name,
+		MAX(user_id) AS user_id,
+		COALESCE(NULLIF(MAX(CASE WHEN type = 2 THEN model_name ELSE '' END), ''), MAX(model_name)) AS model_name,
+		COALESCE(NULLIF(MAX(CASE WHEN type = 2 THEN username ELSE '' END), ''), MAX(username)) AS username,
+		COALESCE(NULLIF(MAX(CASE WHEN type = 2 THEN token_name ELSE '' END), ''), MAX(token_name)) AS token_name,
+		MAX(token_id) AS token_id,
+		COALESCE(NULLIF(MAX(CASE WHEN type = 2 THEN channel_id ELSE 0 END), 0), MAX(channel_id)) AS channel_id,
 		COUNT(DISTINCT channel_id) AS channel_count,
 		MAX(CASE WHEN type = 2 THEN 1 ELSE 0 END) AS has_success,
 		SUM(CASE WHEN type = 2 THEN quota ELSE 0 END) AS total_quota,
 		SUM(CASE WHEN type = 2 THEN prompt_tokens ELSE 0 END) AS total_prompt_tokens,
 		SUM(CASE WHEN type = 2 THEN completion_tokens ELSE 0 END) AS total_completion_tokens,
 		COUNT(*) AS log_count,
-		MAX(CASE WHEN type IN (5, 51, 52) THEN 1 ELSE 0 END) AS has_error,
-		` + model.GetLogGroupCol() + ` AS group_val
+		MAX(CASE WHEN type IN (5, 51, 52, 59) THEN 1 ELSE 0 END) AS has_error,
+		COALESCE(NULLIF(MAX(CASE WHEN type = 2 THEN ` + groupCol + ` ELSE '' END), ''), MAX(` + groupCol + `)) AS group_val,
+		COALESCE(NULLIF(MAX(CASE WHEN type = 2 THEN ip ELSE '' END), ''), MAX(ip)) AS ip,
+		COALESCE(NULLIF(MAX(CASE WHEN type = 2 THEN other ELSE '' END), ''), NULLIF(MAX(CASE WHEN type = 52 THEN other ELSE '' END), ''), NULLIF(MAX(CASE WHEN type = 5 THEN other ELSE '' END), ''), NULLIF(MAX(CASE WHEN type = 51 THEN other ELSE '' END), ''), MAX(other)) AS other,
+		MAX(CASE WHEN is_stream THEN 1 ELSE 0 END) AS has_stream,
+		COALESCE(NULLIF(MAX(CASE WHEN type = 2 THEN content ELSE '' END), ''), NULLIF(MAX(CASE WHEN type = 52 THEN content ELSE '' END), ''), NULLIF(MAX(CASE WHEN type = 5 THEN content ELSE '' END), ''), NULLIF(MAX(CASE WHEN type = 51 THEN content ELSE '' END), ''), MAX(content)) AS content
 	`
+}
+
+// traceSummaryQuery builds one summary row per request_id with full trace fields.
+func traceSummaryQuery(retryReqIds []string) *gorm.DB {
+	if len(retryReqIds) == 0 {
+		// No retry request_ids → return empty result query
+		return emptyTraceSummaryQuery()
+	}
 
 	tx := model.LOG_DB.Table("logs").
-		Select(selectSQL).
+		Select(traceSummarySelectSQL()).
 		Where("type IN (2, 5, 51, 52, 29, 59)").
 		Where("request_id IN ?", retryReqIds)
 
-	tx = applyCommonFilters(tx, params)
-
-	tx = tx.Group("request_id, model_name, username, token_name, " + model.GetLogGroupCol())
+	tx = tx.Group("request_id")
 
 	return tx
 }
 
 // traceSummaryQueryForIds builds the GROUP BY aggregation query for specific request_ids.
-func traceSummaryQueryForIds(params GroupedLogParams, reqIds []string) *gorm.DB {
-	selectSQL := `
-		request_id,
-		MIN(created_at) AS created_at,
-		MAX(created_at) AS max_created_at,
-		model_name,
-		username,
-		token_name,
-		COUNT(DISTINCT channel_id) AS channel_count,
-		MAX(CASE WHEN type = 2 THEN 1 ELSE 0 END) AS has_success,
-		SUM(CASE WHEN type = 2 THEN quota ELSE 0 END) AS total_quota,
-		SUM(CASE WHEN type = 2 THEN prompt_tokens ELSE 0 END) AS total_prompt_tokens,
-		SUM(CASE WHEN type = 2 THEN completion_tokens ELSE 0 END) AS total_completion_tokens,
-		COUNT(*) AS log_count,
-		MAX(CASE WHEN type IN (5, 51, 52) THEN 1 ELSE 0 END) AS has_error,
-		` + model.GetLogGroupCol() + ` AS group_val
-	`
-
+func traceSummaryQueryForIds(reqIds []string) *gorm.DB {
+	if len(reqIds) == 0 {
+		return emptyTraceSummaryQuery()
+	}
 	tx := model.LOG_DB.Table("logs").
-		Select(selectSQL).
+		Select(traceSummarySelectSQL()).
 		Where("type IN (2, 5, 51, 52, 29, 59)").
 		Where("request_id IN ?", reqIds)
 
-	// Apply filters except LogType (already handled by caller)
-	if params.StartTimestamp != 0 {
-		tx = tx.Where("created_at >= ?", params.StartTimestamp)
-	}
-	if params.EndTimestamp != 0 {
-		tx = tx.Where("created_at <= ?", params.EndTimestamp)
-	}
-	if params.ModelName != "" {
-		tx = tx.Where("model_name = ?", params.ModelName)
-	}
-	if params.Username != "" {
-		tx = tx.Where("username = ?", params.Username)
-	}
-	if params.TokenName != "" {
-		tx = tx.Where("token_name = ?", params.TokenName)
-	}
-	if params.Channel != 0 {
-		tx = tx.Where("channel_id = ?", params.Channel)
-	}
-	if params.Group != "" {
-		tx = tx.Where(model.GetLogGroupCol()+" = ?", params.Group)
-	}
-
-	tx = tx.Group("request_id, model_name, username, token_name, " + model.GetLogGroupCol())
+	tx = tx.Group("request_id")
 
 	return tx
 }
@@ -449,16 +499,17 @@ func getChannelPaths(requestIds []string) (map[string]string, error) {
 
 	type channelStep struct {
 		RequestId string `gorm:"column:request_id"`
+		Id        int    `gorm:"column:id"`
 		ChannelId int    `gorm:"column:channel_id"`
 		CreatedAt int64  `gorm:"column:created_at"`
 	}
 
 	var steps []channelStep
 	err := model.LOG_DB.Table("logs").
-		Select("request_id, channel_id, created_at").
+		Select("request_id, id, channel_id, created_at").
 		Where("request_id IN ?", requestIds).
 		Where("type IN (2, 51, 52)"). // Exclude probe records (29/59) per requirement 4.1
-		Order("created_at ASC").
+		Order("created_at ASC, id ASC").
 		Find(&steps).Error
 	if err != nil {
 		return nil, err
@@ -501,9 +552,9 @@ func mergeAndPaginate(summaries []groupedTraceSummaryRow, normals []*model.Log,
 	all = append(all, summaryItems...)
 	all = append(all, normalItems...)
 
-	// Sort by created_at DESC
+	// Sort by newest activity DESC, while summary rows still display the trace start time.
 	sort.Slice(all, func(i, j int) bool {
-		return all[i].CreatedAt > all[j].CreatedAt
+		return itemSortAt(all[i]) > itemSortAt(all[j])
 	})
 
 	// Apply pagination
@@ -515,6 +566,13 @@ func mergeAndPaginate(summaries []groupedTraceSummaryRow, normals []*model.Log,
 		end = len(all)
 	}
 	return all[offset:end]
+}
+
+func itemSortAt(item GroupedLogItem) int64 {
+	if item.SortAt > 0 {
+		return item.SortAt
+	}
+	return item.CreatedAt
 }
 
 // summaryRowToGroupedItem converts a groupedTraceSummaryRow to a GroupedLogItem.
@@ -536,23 +594,27 @@ func summaryRowToGroupedItem(row groupedTraceSummaryRow, channelPaths map[string
 	}
 
 	return GroupedLogItem{
-		Id:               0,
+		Id:               row.Id,
+		UserId:           row.UserId,
 		Type:             summaryType,
 		CreatedAt:        row.CreatedAt,
 		ModelName:        row.ModelName,
 		Username:         row.Username,
 		TokenName:        row.TokenName,
+		TokenId:          row.TokenId,
 		Quota:            row.TotalQuota,
 		PromptTokens:     row.TotalPromptTokens,
 		CompletionTokens: row.TotalCompletionTokens,
 		UseTime:          totalDuration,
-		ChannelId:        0,
+		ChannelId:        row.ChannelId,
 		ChannelName:      "",
 		RequestId:        row.RequestId,
 		Group:            row.Group,
-		Other:            "",
-		IsStream:         false,
-		Content:          "",
+		Ip:               row.Ip,
+		Other:            row.Other,
+		IsStream:         row.HasStream > 0,
+		Content:          row.Content,
+		SortAt:           row.MaxCreatedAt,
 		ChannelPath:      channelPath,
 		TotalDuration:    totalDuration,
 		StepCount:        row.LogCount,
@@ -564,11 +626,13 @@ func summaryRowToGroupedItem(row groupedTraceSummaryRow, channelPaths map[string
 func logToGroupedItem(l *model.Log) GroupedLogItem {
 	return GroupedLogItem{
 		Id:               l.Id,
+		UserId:           l.UserId,
 		Type:             l.Type,
 		CreatedAt:        l.CreatedAt,
 		ModelName:        l.ModelName,
 		Username:         l.Username,
 		TokenName:        l.TokenName,
+		TokenId:          l.TokenId,
 		Quota:            l.Quota,
 		PromptTokens:     l.PromptTokens,
 		CompletionTokens: l.CompletionTokens,
@@ -577,9 +641,11 @@ func logToGroupedItem(l *model.Log) GroupedLogItem {
 		ChannelName:      l.ChannelName,
 		RequestId:        l.RequestId,
 		Group:            l.Group,
+		Ip:               l.Ip,
 		Other:            l.Other,
 		IsStream:         l.IsStream,
 		Content:          l.Content,
+		SortAt:           l.CreatedAt,
 		IsSummary:        false,
 	}
 }
