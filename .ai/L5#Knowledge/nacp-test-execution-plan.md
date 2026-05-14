@@ -738,3 +738,150 @@ timeout 隔离用例详情：
 | trace/grouped 查询 | PASS |
 | 前端路由可访问性 | PASS |
 | timeout 后继续执行与扣费 | FAIL，需要修复 |
+
+## 14. timeout late-success 修复与上线前增强测试计划
+
+更新时间：2026-05-15（Asia/Shanghai）
+
+本节用于接续第 13 节的 FAIL 项，把“线上超时后服务端继续 retry 并扣费”纳入发布门禁。该问题不只是单点 bug，它会同时影响 relay 生命周期、透明重试、预扣/后结算、用户余额、token 余额、渠道统计、消费日志、trace/grouped 日志和管理员对账。
+
+### 14.1 修复目标
+
+| 目标 | 验收口径 |
+|---|---|
+| 上游请求继承客户端 context | 客户端断开、反向代理 504、浏览器取消请求后，正在进行的上游 HTTP/AWS/WebSocket dial 必须尽快取消 |
+| request context 已取消后停止 retry | 不再继续同渠道 retry，不再等待/尝试 pre-warmed standby channel，不再切换到真实渠道完成 late success |
+| context 已取消后禁止结算 | `PostTextConsumeQuota`、`PostAudioConsumeQuota`、`PostWssConsumeQuota`、`SettleBilling` 不得更新用户余额、token 余额、用户 used_quota、渠道 used_quota 或消费日志 |
+| 预扣必须退款 | 如果请求在预扣之后因 client context canceled 结束，`BillingSession.Refund` 必须执行，余额和 token quota 回到请求前 |
+| 日志可解释 | 管理员日志中允许存在 client closed / 499 类错误记录，但不得存在同 request_id 的 type=2 消费成功记录 |
+
+### 14.2 已加入代码级防护点
+
+| 位置 | 防护 |
+|---|---|
+| `relay/channel/api_request.go` | `DoApiRequest`、`DoFormRequest`、`DoTaskApiRequest` 使用 `http.NewRequestWithContext(c.Request.Context(), ...)`；`DoWssRequest` 使用 `DialContext`；`doRequest` 在请求前和失败后检查 context |
+| `relay/channel/aws/relay-aws.go` | AWS Bedrock `InvokeModel` / `InvokeModelWithResponseStream` 的 context 改为从 `c.Request.Context()` 派生，再叠加 `RelayTimeout` |
+| `controller/relay.go` | 主 retry、same-channel retry、pre-warm standby retry 前后检查 context；取消后设置 499 skip-retry 错误并走退款 defer |
+| `service/text_quota.go` | 文本/Claude/Codex 计费入口在 context canceled 时直接跳过结算和消费日志 |
+| `service/quota.go` | audio 与 realtime/WSS 计费入口在 context canceled 时跳过结算和消费日志 |
+| `service/billing.go` | `SettleBilling` 兜底拒绝 canceled context 下的任何后结算 |
+| `service/request_context.go` | 统一生成 `client request closed` / status `499` / `skipRetry` 错误 |
+
+### 14.3 本地回归门禁
+
+| 编号 | 命令 | 必须结果 |
+|---|---|---|
+| L-CTX-01 | `GOCACHE=/private/tmp/nacp-go-build go test ./relay/channel ./service ./controller` | PASS |
+| L-CTX-02 | `GOCACHE=/private/tmp/nacp-go-build go test ./...` | PASS；若有历史 flaky/环境依赖，必须列出包名和原因 |
+| L-CTX-03 | `GOCACHE=/private/tmp/nacp-go-build go test ./relay/channel -run TestDoRequestStopsWhenClientContextCanceled -count=1` | PASS，确认 canceled context 被转换为 499 skip-retry |
+| L-CTX-04 | `go test` 后 `git diff --check` | PASS，无格式/空白问题 |
+| L-CTX-05 | `go build ./...` | PASS，确认所有 provider adaptor 编译通过 |
+
+### 14.4 线上 P0 验收矩阵
+
+| 编号 | 场景 | 操作 | 预期用户侧 | 预期管理员侧 | 预期计费/统计 |
+|---|---|---|---|---|---|
+| O-CTX-01 | mock timeout，客户端等待超过网关超时 | mock 置 timeout；普通用户 token 调 Claude 非流 | 客户端收到 504 或连接关闭 | trace 不得出现 timeout 后的真实渠道成功消费 | 用户余额、token 余额、used_quota、渠道 used_quota 均不增加；预扣已退款 |
+| O-CTX-02 | mock timeout，客户端主动 10 秒取消 | `curl --max-time 10` 调 Claude 非流 | curl 超时退出 | 10 秒后服务端不应继续到 standby 成功 | 无 type=2 消费日志；无 late success 扣费 |
+| O-CTX-03 | mock timeout，Claude stream 主动取消 | `curl --max-time 10 -N` 调 `/v1/chat/completions stream=true` | SSE 中断 | 不继续 fallback 到真实渠道后结算 | 无消费日志或 quota=0 错误日志；预扣退款 |
+| O-CTX-04 | Codex stream 主动取消 | `curl --max-time 10 -N` 调 `/v1/responses stream=true` | SSE 中断 | 不出现 Codex late consume | token/user/channel 统计不增加 |
+| O-CTX-05 | AWS fallback 请求取消 | 让 mock 500 后优先命中 AWS，并在 AWS 请求期间客户端取消 | 客户端取消 | AWS SDK context 取消，不再等完整响应 | 不因 AWS late response 结算 |
+| O-CTX-06 | pre-warm 正在 probe 时客户端取消 | mock 500；开启 pre-warm；客户端短超时取消 | 客户端取消 | 主请求不等待 pre-warm 完成后继续 standby | 无真实渠道成功消费 |
+| O-CTX-07 | 正常慢请求未取消 | mock 延迟小于网关/客户端超时 | HTTP 200 | 正常 type=2 消费日志 | 正常扣费，不能误判为取消 |
+| O-CTX-08 | 正常透明重试 | mock 429/500，不取消客户端 | HTTP 200 fallback 成功 | type=51 quota=0 + type=2 最终消费 | 总扣费等于最终成功渠道 quota |
+
+### 14.5 上线前全量增强测试树
+
+```mermaid
+mindmap
+  root((NACP 上线前测试树))
+    Relay 生命周期
+      非流
+      流式 SSE
+      Responses/Codex
+      Claude Messages
+      AWS Bedrock
+      WebSocket/Realtime
+      客户端取消
+      反向代理 504
+    渠道系统
+      选择优先级
+      权重
+      same-channel retry
+      pre-warm standby
+      自动禁用
+      健康恢复
+      多 key
+      header/param override
+    计费系统
+      预扣
+      退款
+      后结算
+      tiered billing
+      cache tokens
+      web/file search
+      audio/image
+      订阅计费
+      钱包计费
+    计量统计
+      user used_quota
+      token remain_quota
+      channel used_quota
+      request_count
+      type=2 consume log
+      type=51 intercepted
+      type=52 visible error
+    权限额度
+      普通用户
+      token 模型限制
+      token 分组限制
+      低余额
+      unlimited quota
+      playground/self-use
+    管理端
+      日志列表
+      grouped
+      trace detail
+      渠道测试
+      用户额度调整
+      模型价格配置
+    前端
+      console/log
+      console/trace
+      token
+      wallet/topup
+      channel/admin
+      i18n
+```
+
+### 14.6 上线前必测表
+
+| 模块 | 测试点 | 核对依据 |
+|---|---|---|
+| 用户/token | 新建普通用户、新建 token、取 key、禁用 token、删除 token | API 返回、DB token 状态、普通用户不能越权 |
+| 模型权限 | token 仅允许 Codex 时调用 Claude；仅允许 Claude 时调用 Codex | HTTP 403，无消费日志，无余额变化 |
+| 钱包计费 | 非流、流式、Responses、Claude、AWS 成功扣费 | 用户余额减少、token 余额减少、used_quota 增加、type=2 quota 一致 |
+| 预扣退款 | 400/401/403/429/500/timeout/client cancel | 失败记录 quota=0；预扣完全退款 |
+| 透明重试 | 401/403/429/500/502/503 组合 | type=51 记录失败渠道，最终 type=2 只出现一次 |
+| 不应重试 | token 权限、额度不足、模型价格缺失、参数错误 | HTTP 4xx；不切真实渠道；不扣费 |
+| 渠道健康 | 连续失败、恢复成功、自动禁用阈值 | health 状态、错误计数、auto-ban 行为符合配置 |
+| 统计一致性 | 用户、token、channel、日志四账本 | `sum(type=2 quota)` 与 user/channel/token delta 对齐 |
+| trace/grouped | 单步成功、多步 retry、最终失败、client cancel | trace 步骤顺序、渠道链路、total quota/token 正确 |
+| 前端 | `/console/log`、`/console/trace`、`/console/token`、`/console/channel` | HTTP 200；核心表格可加载；无白屏 |
+| 数据库兼容 | SQLite/MySQL/PostgreSQL migration + 关键查询 | migration 成功；日志聚合 SQL 无方言问题 |
+| 并发 | 同用户 10/50 并发请求，同 token 并发扣费 | 无负余额、无重复结算、无数据竞争迹象 |
+| 长连接 | SSE 客户端正常读完、中途取消、网络断开 | 正常读完才扣费；中途取消不 late consume |
+
+### 14.7 当前发布门禁状态
+
+| 门禁 | 状态 |
+|---|---|
+| 本地相关包测试 | PASS：`./relay/channel ./service ./controller` |
+| 全量编译 | PASS：`GOCACHE=/private/tmp/nacp-go-build go build ./...`；Go module stat cache 写入用户目录有 sandbox warning，但命令退出码为 0 |
+| 全量 `go test ./...` | FAIL：`relay/channel/claude` 3 个文件内容转换测试失败；`relay/helper` 1 个 stream scanner 测试失败；均不在本次 context/计费修改路径上，需单独归档或修复后再作为全量门禁 |
+| timeout late-success 修复 | 已本地实现，待提交、构建、部署 |
+| 线上 O-CTX-01/O-CTX-02 重测 | 待执行 |
+| Docker 构建/GitHub Actions | 待执行 |
+| 线上更大范围回归 | 待执行 |
+
+发布结论：在 O-CTX-01/O-CTX-02 线上复测通过前，不应把本次变更视为可上线完成。

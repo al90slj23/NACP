@@ -1,11 +1,14 @@
 package channel
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -190,4 +193,27 @@ func TestProcessHeaderOverride_PassHeadersTemplateSetsRuntimeHeaders(t *testing.
 	require.Equal(t, "Codex CLI", upstreamReq.Header.Get("Originator"))
 	require.Equal(t, "sess-123", upstreamReq.Header.Get("Session_id"))
 	require.Empty(t, upstreamReq.Header.Get("X-Codex-Beta-Features"))
+}
+
+func TestDoRequestStopsWhenClientContextCanceled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service.InitHttpClient()
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	baseReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	reqCtx, cancel := context.WithCancel(baseReq.Context())
+	ctx.Request = baseReq.WithContext(reqCtx)
+	cancel()
+
+	upstreamReq, err := http.NewRequestWithContext(ctx.Request.Context(), http.MethodPost, "http://127.0.0.1:1", nil)
+	require.NoError(t, err)
+
+	resp, err := doRequest(ctx, upstreamReq, &relaycommon.RelayInfo{})
+	require.Nil(t, resp)
+	require.Error(t, err)
+	var apiErr *types.NewAPIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, 499, apiErr.StatusCode)
+	require.Equal(t, types.ErrorCodeDoRequestFailed, apiErr.GetErrorCode())
 }

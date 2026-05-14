@@ -192,6 +192,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	cfg := service.GetHealthConfig()
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+		if apiErr := service.NewRequestCanceledErrorIfDone(c); apiErr != nil {
+			newAPIError = apiErr
+			break
+		}
+
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
@@ -223,6 +228,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = geminiRelayHandler(c, relayInfo)
 		default:
 			newAPIError = relayHandler(c, relayInfo)
+		}
+
+		if service.WasBillingSkippedRequestCanceled(c) {
+			newAPIError = service.NewRequestCanceledError(c)
+			relayInfo.LastError = newAPIError
+			break
 		}
 
 		if newAPIError == nil {
@@ -281,6 +292,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}()
 
 		for retry := 0; retry < common.SameChannelRetryCount; retry++ {
+			if apiErr := service.NewRequestCanceledErrorIfDone(c); apiErr != nil {
+				newAPIError = apiErr
+				relayInfo.LastError = newAPIError
+				break
+			}
+
 			// Reset body for retry
 			bodyStorage, bodyErr = common.GetBodyStorage(c)
 			if bodyErr != nil {
@@ -297,6 +314,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				newAPIError = geminiRelayHandler(c, relayInfo)
 			default:
 				newAPIError = relayHandler(c, relayInfo)
+			}
+
+			if service.WasBillingSkippedRequestCanceled(c) {
+				newAPIError = service.NewRequestCanceledError(c)
+				relayInfo.LastError = newAPIError
+				break
 			}
 
 			if newAPIError == nil {
@@ -337,6 +360,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			}
 		}
 
+		if service.RequestContextErr(c) != nil {
+			return
+		}
+
 		if sameChannelSuccess {
 			return
 		}
@@ -345,11 +372,23 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		service.OnUserRequestError(channel.Id, statusCode, newAPIError.Error())
 
 		// Wait for pre-warm results
-		<-preWarmDone
+		select {
+		case <-preWarmDone:
+		case <-c.Request.Context().Done():
+			newAPIError = service.NewRequestCanceledError(c)
+			relayInfo.LastError = newAPIError
+			return
+		}
 
 		// Try pre-warmed channels that passed probe
 		preWarmSuccess := false
 		for i, result := range preWarmResults {
+			if apiErr := service.NewRequestCanceledErrorIfDone(c); apiErr != nil {
+				newAPIError = apiErr
+				relayInfo.LastError = newAPIError
+				break
+			}
+
 			if result == nil || !result.Success {
 				continue
 			}
@@ -378,6 +417,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				newAPIError = relayHandler(c, relayInfo)
 			}
 
+			if service.WasBillingSkippedRequestCanceled(c) {
+				newAPIError = service.NewRequestCanceledError(c)
+				relayInfo.LastError = newAPIError
+				break
+			}
+
 			if newAPIError == nil {
 				relayInfo.LastError = nil
 				service.OnUserRequestSuccess(standbyChannel.Id)
@@ -387,6 +432,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = service.NormalizeViolationFeeError(newAPIError)
 			relayInfo.LastError = newAPIError
 			processChannelError(c, *types.NewChannelError(standbyChannel.Id, standbyChannel.Type, standbyChannel.Name, standbyChannel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), standbyChannel.GetAutoBan()), newAPIError)
+		}
+
+		if service.RequestContextErr(c) != nil {
+			return
 		}
 
 		if preWarmSuccess {
@@ -713,6 +762,11 @@ func RelayTask(c *gin.Context) {
 	}
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+		if ctxErr := service.RequestContextErr(c); ctxErr != nil {
+			taskErr = service.TaskErrorWrapperLocal(ctxErr, "client_request_closed", 499)
+			break
+		}
+
 		var channel *model.Channel
 
 		if lockedCh, ok := relayInfo.LockedChannel.(*model.Channel); ok && lockedCh != nil {
@@ -746,6 +800,10 @@ func RelayTask(c *gin.Context) {
 		c.Request.Body = io.NopCloser(bodyStorage)
 
 		result, taskErr = relay.RelayTaskSubmit(c, relayInfo)
+		if ctxErr := service.RequestContextErr(c); ctxErr != nil {
+			taskErr = service.TaskErrorWrapperLocal(ctxErr, "client_request_closed", 499)
+			break
+		}
 		if taskErr == nil {
 			break
 		}
