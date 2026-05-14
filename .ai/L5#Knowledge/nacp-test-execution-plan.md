@@ -588,3 +588,88 @@ Claude 请求证据：
 | 可控 mock 故障矩阵 | BLOCKED |
 | 普通用户 Codex 正常调用 | BLOCKED |
 | grouped/trace API 线上验证 | BLOCKED |
+
+## 12. 正式部署后在线测试记录
+
+执行时间：2026-05-15 04:11-04:27（Asia/Shanghai）
+
+部署流程：
+
+| 步骤 | 结果 |
+|---|---|
+| 本地提交 | commit `2593ad5`，`add request trace logging and online test plan` |
+| 推送 GitHub | `main -> main` 成功 |
+| GitHub Actions | `Build and Push Docker Image` run `25883024851` 成功 |
+| 镜像 | `ghcr.io/al90slj23/nacp:main` |
+| 镜像 digest | `sha256:e0ec768d918c8149d92f19f32c9089453ca2d8f6e29c477902f5a051933aacc4` |
+| 服务器部署 | `docker pull` + `docker compose up -d` 成功 |
+| 新接口验证 | `/api/log/traces`、`/api/log/grouped` 均返回 200 |
+
+部署前本地验证：
+
+| 验证 | 结果 |
+|---|---|
+| `./gogogo.sh 7` service 单测 | PASS |
+| `GOCACHE=/private/tmp/nacp-gocache go build ./...` | PASS |
+| `cd web && bunx vitest run` | PASS |
+
+测试环境修正：
+
+| 项 | 调整 |
+|---|---|
+| `MOCK-Controllable-P100` | `base_url` 改为 `http://172.19.0.1:18080`，由 `/tmp/mock_status.txt` 控制状态码 |
+| Codex 模型倍率 | 通过 `/api/option/` 给 `gpt-5.3-codex`、`gpt-5.3-codex-spark`、`gpt-5.1-codex`、`gpt-5.1-codex-mini`、`gpt-5-codex` 增加 `ModelRatio` |
+| 管理员临时设置 | 已恢复，`SelfUseModeEnabled=false`，管理员用户 setting 清空 |
+
+本轮普通用户：
+
+| 项 | 值 |
+|---|---|
+| 普通用户 | `nacp_t_deploy_042314` |
+| 用户 ID | `5` |
+| Token 名称 | `ordinary-online-token-042314` |
+| Token ID | `4` |
+| Token 掩码 | `v1x8**********BhJR` |
+| 初始测试额度 | 用户 `2000000`，token `1000000` |
+
+正式用例结果：
+
+| 用例 | mock 状态 | request_id | 最终渠道 | HTTP | 消费 quota | prompt/completion | 结论 |
+|---|---:|---|---|---:|---:|---:|---|
+| Claude mock 200 基线 | 200 | `202605142023283188866368268d9d65t5hn9YA` | `MOCK-Controllable-P100` | 200 | 25 | 20 / 6 | PASS |
+| Claude mock 500 透明重试 | 500 | `202605142023338150123558268d9d6zOo6CrWo` | `NACP-test-aws` | 200 | 46 | 21 / 14 | PASS |
+| Claude mock 429 透明重试 | 429 | `202605142023432921470598268d9d6zpRLjHkX` | `NACP-test-CCM` | 200 | 96 | 121 / 14 | PASS |
+| Codex 普通用户 `/v1/responses` | 不适用 | `20260514202351551152608268d9d62yMEEq6y` | `NACP-test-codex` | 200 | 82 | 19 / 14 | PASS |
+
+关键核对：
+
+| 核对项 | 结果 |
+|---|---|
+| 普通用户总扣费 | `249 = 25 + 46 + 96 + 82`，与用户 `used_quota=249` 一致 |
+| 失败重试是否扣费 | mock 500/429 的 type=51 记录 quota 均为 `0` |
+| 透明重试链路 | 500 场景链路 `12 -> 14`；429 场景链路 `12 -> 13` |
+| Codex 计费路径 | `model_ratio=0.625`，`request_path=/v1/responses`，`request_conversion=["OpenAI Responses"]` |
+| 管理员日志 | `/api/log/?username=nacp_t_deploy_042314` 返回 11 条记录，包括额度增加、失败尝试、最终消费 |
+| trace 详情 | `/api/log/trace?request_id=...` 能返回步骤和 total quota/token |
+| trace 列表 | `/api/log/traces?username=nacp_t_deploy_042314` 返回 2 条多步骤链路摘要 |
+| grouped 接口 | `/api/log/grouped?request_id=...` 返回 200；带 request_id 时按明细行返回，不生成摘要行 |
+| 渠道健康 | 12/13/14/15/16/17 测后均为 `healthy` |
+
+测后渠道状态：
+
+| 渠道 | health | used_quota | 说明 |
+|---|---|---:|---|
+| `MOCK-Controllable-P100` | healthy | 25 | mock 200 消费 |
+| `NACP-test-CCM` | healthy | 19193 | 429 fallback 命中 |
+| `NACP-test-aws` | healthy | 148 | 500 fallback 命中 |
+| `NACP-test-kiro` | healthy | 0 | 本轮未命中 |
+| `NACP-test-codex` | healthy | 16807 | Codex 普通用户命中 |
+| `NACP-test-claude` | healthy | 0 | 本轮未命中 |
+
+本轮剩余观察点：
+
+| 观察点 | 处理建议 |
+|---|---|
+| 响应头未稳定暴露 `new-api-request-id` | 自动化脚本应从管理员日志按 username/token/time 回查 request_id，或后续增强响应头稳定性 |
+| `/api/log/grouped?request_id=...` 当前返回明细行 | 如果前端期望摘要行，需要调整接口语义或前端使用 `/api/log/trace` 展开详情 |
+| `/api/log/traces` 仅列多步骤/失败链路 | 当前符合“链路视图优先展示重试/异常”的实现；若要全量请求链路，需要放宽 `HAVING` 条件 |
