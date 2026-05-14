@@ -673,3 +673,68 @@ Claude 请求证据：
 | 响应头未稳定暴露 `new-api-request-id` | 自动化脚本应从管理员日志按 username/token/time 回查 request_id，或后续增强响应头稳定性 |
 | `/api/log/grouped?request_id=...` 当前返回明细行 | 如果前端期望摘要行，需要调整接口语义或前端使用 `/api/log/trace` 展开详情 |
 | `/api/log/traces` 仅列多步骤/失败链路 | 当前符合“链路视图优先展示重试/异常”的实现；若要全量请求链路，需要放宽 `HAVING` 条件 |
+
+## 13. 扩展在线回归记录
+
+执行时间：2026-05-15 05:29-05:35（Asia/Shanghai）
+
+目的：在核心链路通过后，扩大到故障码、超时、流式、权限、额度、前端路由和日志聚合。
+
+测试用户与 token：
+
+| 项 | 值 |
+|---|---|
+| 普通用户 | `nacp_t_ext_052951` |
+| 用户 ID | `6` |
+| 主 token | `ext-main-052951`，ID `5`，掩码 `mbdT**********f1Dc` |
+| 限制 token | `ext-limit-codex-052951`，ID `6`，仅允许 `gpt-5.3-codex` |
+| 低额度 token | `ext-low-052951`，ID `7`，额度 `1` |
+
+扩展用例结果：
+
+| 用例 | 预期 | 实际 | 结论 |
+|---|---|---|---|
+| mock 401 | 透明重试到真实 Claude 渠道 | HTTP 200，最终 `NACP-test-kiro` 成功，quota `32`；中途 `NACP-test-aws` 返回 503 memory overloaded | PASS |
+| mock 403 | 透明重试到真实 Claude 渠道 | HTTP 200，最终 `NACP-test-CCM` 成功，quota `96` | PASS |
+| mock 500 + stream | 流式透明重试成功 | HTTP 200，SSE 中包含 `NACP-STREAM-FALLBACK-OK`，最终 `NACP-test-CCM` 成功，quota `52` | PASS |
+| Codex stream | `/v1/responses` 流式成功 | HTTP 200，SSE 中包含 `NACP-CODEX-STREAM-OK`，quota `76` | PASS |
+| Codex non-stream | `/v1/responses` 非流成功 | HTTP 200，返回 `NACP-CODEX-EXT-OK`，quota `290` | PASS |
+| 模型限制 token | 不允许访问 Claude 模型，不扣费 | HTTP 403，`This token has no access...`；该 token 无消费日志 | PASS |
+| 低额度 token | 预扣失败，不扣费 | HTTP 403，`token quota is not enough...`；该 token 无消费日志 | PASS |
+| 前端路由 | 核心页面可访问 | `/`、`/console/log`、`/console/trace`、`/console/token` 均 HTTP 200 | PASS |
+| mock timeout 隔离 | 客户端超时/504 后不应继续扣费 | 客户端 61 秒收到 HTTP 504；但服务端继续执行到 95 秒后 fallback 到 `NACP-test-CCM` 成功，并扣费 `96` | FAIL |
+
+timeout 隔离用例详情：
+
+| 字段 | 值 |
+|---|---|
+| request_id | `202605142133393323707318268d9d6eOJZ8Nou` |
+| 客户端结果 | HTTP 504，elapsed `61s` |
+| 服务端 trace | 3 次 channel 12 timeout/error 记录后，channel 13 成功 |
+| 最终消费 | quota `96`，prompt `121`，completion `14` |
+| 风险 | 客户端已经收到失败，但服务端仍完成上游请求并扣费，可能造成“用户认为失败但余额减少”的一致性问题 |
+| 建议 | relay 应感知 client context cancellation / gateway timeout，超时返回后停止后续 retry 或避免 post-consume；至少要把这类 late success 标为不可扣费或可退款 |
+
+扩展测试后渠道状态：
+
+| 渠道 | health | used_quota | 说明 |
+|---|---|---:|---|
+| `MOCK-Controllable-P100` | healthy | 50 | mock 200 与 timeout 异步成功累计 |
+| `NACP-test-CCM` | healthy | 19437 | 403、stream、timeout fallback 命中 |
+| `NACP-test-aws` | healthy | 148 | 多次返回上游 503 memory overloaded，未最终消费 |
+| `NACP-test-kiro` | healthy | 32 | 401 fallback 最终命中 |
+| `NACP-test-codex` | healthy | 17173 | stream 与 non-stream Codex 命中 |
+| `NACP-test-claude` | healthy | 0 | 本轮未命中 |
+
+扩展回归结论：
+
+| 模块 | 结论 |
+|---|---|
+| 普通请求透明重试 | PASS |
+| 流式透明重试 | PASS |
+| Codex Responses 普通用户 | PASS |
+| token 模型限制 | PASS |
+| token 低额度预扣 | PASS |
+| trace/grouped 查询 | PASS |
+| 前端路由可访问性 | PASS |
+| timeout 后继续执行与扣费 | FAIL，需要修复 |
