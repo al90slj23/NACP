@@ -885,3 +885,59 @@ mindmap
 | 线上更大范围回归 | 待执行 |
 
 发布结论：在 O-CTX-01/O-CTX-02 线上复测通过前，不应把本次变更视为可上线完成。
+
+## 15. timeout late-success 修复后在线复测记录
+
+执行时间：2026-05-15 06:17-06:36（Asia/Shanghai）
+
+部署信息：
+
+| 项 | 值 |
+|---|---|
+| 修复提交 | `5f917f2`，`fix relay cancellation billing leak` |
+| GitHub Actions | `Build and Push Docker Image` run `25889159470` 成功 |
+| 部署镜像 | `ghcr.io/al90slj23/nacp:main` |
+| 镜像 digest | `sha256:752befb446802e5220f22f37274098793755bf9136a81ec18238b3f608180d71` |
+| 部署方式 | `docker pull` + `/opt/nacp/docker compose up -d` |
+| 测后状态 | `nacp` running；mock upstream 已恢复 `200`；`/api/status` 返回 `success=true` |
+
+本轮测试用户：
+
+| 项 | 值 |
+|---|---|
+| 普通用户 | `nacp_t_ctx2_062904` |
+| 用户 ID | `9` |
+| Token 名称 | `ctx2-cancel-062904` |
+| Token ID | `9` |
+| Token 掩码 | `btU2**********10np` |
+| 初始测试额度 | 用户 `2000000`，token `1000000` |
+
+修复后验收结果：
+
+| 编号 | 场景 | 客户端结果 | 余额/统计结果 | 日志结果 | 结论 |
+|---|---|---|---|---|---|
+| O-CTX-02 | mock `599`，客户端 `curl --max-time 10` 主动取消 | curl exit `28`，HTTP `000`，`10.004s` | 用户 `quota/used/request_count` 保持 `2000000/0/0`；token `remain/used` 保持 `1000000/0` | 2 条失败日志：type=51 `499`、type=52 `499`；type=2 数量 `0`、消费 quota `0` | PASS |
+| O-CTX-08 | mock `429`，客户端正常等待 fallback | HTTP `200`，`3.816s` | 用户从 `2000000/0/0` 到 `1999899/101/1`；token 从 `1000000/0` 到 `999899/101` | 3 条 type=51 quota=0 + 1 条 type=2 quota=101；type=52 数量 `0` | PASS |
+| O-CTX-01 | mock `599`，不主动取消，等待 openresty 504 | HTTP `504`，`61.173s` | 用户保持 `1999899/101/1`；token 保持 `999899/101`，无新增扣费 | 2 条 type=51，分别为 upstream do request failed 和 `499 context canceled`；type=2 数量 `0`、type=52 数量 `0` | PASS |
+
+关键结论：
+
+| 风险点 | 修复后结果 |
+|---|---|
+| 客户端已经失败/断开后服务端继续 fallback 到真实渠道 | 未复现，110 秒窗口内没有 late success |
+| 客户端失败后仍扣费 | 未复现，用户余额、token 余额、used_quota、request_count 均不变 |
+| 正常成功请求被误记为 client canceled | 已修正，O-CTX-08 无 type=52 |
+| 正常透明重试被误伤 | 未误伤，O-CTX-08 正常 429 -> channel 13 成功，且只最终扣费一次 |
+
+当前发布门禁更新：
+
+| 门禁 | 状态 |
+|---|---|
+| O-CTX-01 gateway 504 late-success | PASS |
+| O-CTX-02 client cancel late-success | PASS |
+| O-CTX-08 normal fallback regression | PASS |
+| 本地相关包测试 | PASS：`GOCACHE=/private/tmp/nacp-go-build go test ./relay/channel ./service ./controller` |
+| 全量编译 | PASS：`GOCACHE=/private/tmp/nacp-go-build go build ./...`（有 sandbox 下 Go module stat cache warning，退出码 0） |
+| 全量 `go test ./...` | 仍有既有失败：`relay/channel/claude` 文件内容转换断言、`relay/helper` stream scanner 断言；未纳入本次修复完成条件，但上线前建议单独清理 |
+
+发布结论：timeout late-success 扣费问题已通过线上复测；本修复可进入下一轮更大范围回归。
