@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Spin, Tag, Empty, Typography } from '@douyinfe/semi-ui';
+import { Spin, Tag, Empty, Typography, Tooltip, Toast } from '@douyinfe/semi-ui';
 import { useTranslation } from 'react-i18next';
 import {
   API,
@@ -14,17 +14,13 @@ import {
   renderTaskBillingProcess,
   renderTieredModelPrice,
   timestamp2string,
+  copy,
 } from '../../../helpers';
 
 const stepConfig = {
   2: { label: '2：正常消费成功', color: 'lime' },
-  20: { label: '20：容错重试后成功', color: 'green' },
-  21: { label: '21：容错重试成功', color: 'green' },
-  29: { label: '29：容错探测成功', color: 'blue' },
-  50: { label: '50：容错重试后失败', color: 'red' },
-  51: { label: '51：容错重试已拦截', color: 'yellow' },
-  52: { label: '52：容错重试客户端可见', color: 'red' },
-  59: { label: '59：容错探测失败', color: 'grey' },
+  4: { label: '4：系统日志', color: 'purple' },
+  5: { label: '5：普通错误', color: 'red' },
 };
 
 const colors = [
@@ -46,7 +42,72 @@ const colors = [
 ];
 
 const gridTemplateColumns =
-  '38px 168px 190px 220px 150px 130px 190px 190px 128px 72px 72px 110px 130px 150px minmax(220px, 1fr)';
+  '72px 168px 190px 220px 150px 130px 190px 190px 128px 72px 72px 110px 130px 150px minmax(220px, 1fr)';
+
+async function copyLogId(event, id, t) {
+  event.stopPropagation();
+  const text = String(id || '');
+  if (!text) {
+    return;
+  }
+  if (await copy(text)) {
+    Toast.success(`${t('已复制')} Log ID: ${text}`);
+  } else {
+    Toast.error(t('复制失败'));
+  }
+}
+
+function LogIdMarker({
+  id,
+  sequence,
+  requestId,
+  traceId,
+  traceSeq,
+  traceParentId,
+  traceSiblingSeq,
+  traceRole,
+  prefix,
+  t,
+}) {
+  const content = (
+    <div style={{ lineHeight: 1.6 }}>
+      <div>Log ID: {id || '-'}</div>
+      <div>Trace ID: {traceId || requestId || '-'}</div>
+      <div>Trace Seq: {traceSeq || sequence || '-'}</div>
+      <div>Trace Role: {traceRole || '-'}</div>
+      <div>Parent Log ID: {traceParentId || '-'}</div>
+      <div>Sibling Seq: {traceSiblingSeq || '-'}</div>
+      <div>Request ID: {requestId || '-'}</div>
+      <div style={{ color: 'var(--semi-color-text-2)' }}>{t('点击复制')}</div>
+    </div>
+  );
+
+  return (
+    <Tooltip content={content} position='top'>
+      <button
+        type='button'
+        onClick={(event) => copyLogId(event, id, t)}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
+          width: 58,
+          border: 'none',
+          padding: 0,
+          background: 'transparent',
+          color: 'var(--semi-color-text-2)',
+          fontFamily: 'monospace',
+          cursor: 'copy',
+        }}
+      >
+        <span>{prefix}</span>
+        <Tag color='grey' size='small' shape='circle'>
+          #{id || '-'}
+        </Tag>
+      </button>
+    </Tooltip>
+  );
+}
 
 function requestConversionDisplayValue(conversionChain, t) {
   const chain = Array.isArray(conversionChain)
@@ -231,10 +292,7 @@ function TypeTag({ type, t }) {
 }
 
 function getTraceStepDisplayType(type) {
-  // The persisted consume log is still type=2 for billing/statistics. Inside a
-  // retry summary trace it represents the final retry success, so display it as
-  // 21 to avoid confusing it with a direct no-retry consume success.
-  return type === 2 ? 21 : type;
+  return type;
 }
 
 function TraceCell({ children, className = '', style = {} }) {
@@ -370,11 +428,21 @@ const TraceExpandRender = ({ requestId, billingDisplayMode = 'price' }) => {
             >
               <TraceCell
                 style={{
-                  color: 'var(--semi-color-text-2)',
-                  fontFamily: 'monospace',
+                  overflow: 'visible',
                 }}
               >
-                {prefix}
+                <LogIdMarker
+                  id={step.id}
+                  sequence={step.sequence}
+                  requestId={step.request_id || requestId}
+                  traceId={step.trace_id}
+                  traceSeq={step.trace_seq}
+                  traceParentId={step.trace_parent_id}
+                  traceSiblingSeq={step.trace_sibling_seq}
+                  traceRole={step.trace_role}
+                  prefix={prefix}
+                  t={t}
+                />
               </TraceCell>
               <TraceCell>{timestamp2string(step.created_at)}</TraceCell>
               <TraceCell>

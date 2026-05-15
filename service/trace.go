@@ -37,6 +37,13 @@ type TraceSummary struct {
 // TraceStep 链路步骤 DTO
 type TraceStep struct {
 	Id               int    `json:"id"`
+	RequestId        string `json:"request_id"`
+	Sequence         int    `json:"sequence"`
+	TraceId          string `json:"trace_id"`
+	TraceSeq         int    `json:"trace_seq"`
+	TraceParentId    int    `json:"trace_parent_id"`
+	TraceSiblingSeq  int    `json:"trace_sibling_seq"`
+	TraceRole        string `json:"trace_role"`
 	ChannelId        int    `json:"channel_id"`
 	ChannelName      string `json:"channel_name"`
 	Type             int    `json:"type"`
@@ -199,16 +206,21 @@ type traceLogRow struct {
 	Ip               string `gorm:"column:ip"`
 	IsStream         bool   `gorm:"column:is_stream"`
 	Content          string `gorm:"column:content"`
+	TraceId          string `gorm:"column:trace_id"`
+	TraceSeq         int    `gorm:"column:trace_seq"`
+	TraceParentId    int    `gorm:"column:trace_parent_id"`
+	TraceSiblingSeq  int    `gorm:"column:trace_sibling_seq"`
+	TraceRole        string `gorm:"column:trace_role"`
 }
 
 // GetTraceDetail queries the full trace detail for a given request_id.
 func GetTraceDetail(requestId string) (*TraceDetail, error) {
 	var rows []traceLogRow
 	err := model.LOG_DB.Table("logs").
-		Select("id, channel_id, type, use_time, model_name, quota, created_at, other, username, token_name, prompt_tokens, completion_tokens, "+logGroupCol()+" AS group_val, ip, is_stream, content").
+		Select("id, channel_id, type, use_time, model_name, quota, created_at, other, username, token_name, prompt_tokens, completion_tokens, "+logGroupCol()+" AS group_val, ip, is_stream, content, trace_id, trace_seq, trace_parent_id, trace_sibling_seq, trace_role").
 		Where("request_id = ?", requestId).
-		Where("type IN (2, 5, 51, 52, 29, 59)").
-		Order("created_at ASC, id ASC").
+		Where("(type IN (2, 5, 51, 52, 29, 59) OR (type = 4 AND trace_role = ?))", model.TraceRoleProbeSuccess).
+		Order("CASE WHEN trace_seq > 0 THEN trace_seq ELSE 2147483647 END ASC, created_at ASC, id ASC").
 		Limit(100).
 		Find(&rows).Error
 	if err != nil {
@@ -282,6 +294,13 @@ func GetTraceDetail(requestId string) (*TraceDetail, error) {
 
 		step := TraceStep{
 			Id:               row.Id,
+			RequestId:        requestId,
+			Sequence:         i + 1,
+			TraceId:          row.TraceId,
+			TraceSeq:         row.TraceSeq,
+			TraceParentId:    row.TraceParentId,
+			TraceSiblingSeq:  row.TraceSiblingSeq,
+			TraceRole:        row.TraceRole,
 			ChannelId:        row.ChannelId,
 			ChannelName:      channelMap[row.ChannelId],
 			Type:             row.Type,

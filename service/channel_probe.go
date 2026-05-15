@@ -5,10 +5,12 @@
   - 最小请求体（max_tokens=1），3 秒超时
   - 并行探测多个顺位渠道，建立就绪队列
   - 探测成本独立记录（user_id=0，不计入用户账单）
+
 【主要函数】
   - ProbeChannel: 同步探测单个渠道
   - ProbeNextChannels: 并行探测多个顺位渠道
   - StartDegradedProbeLoop: 后台定时探测降级渠道
+
 【依赖关系】
   - common: JSON 封装、日志
   - model: Channel 数据模型
@@ -255,10 +257,10 @@ func recordProbeLog(probeLog *ProbeLog, requestId string) {
 			probeLog.ChannelID, probeLog.ModelName, probeLog.Success, probeLog.LatencyMs, probeLog.Trigger))
 	}
 
-	// Determine log type
-	logType := model.LogTypeProbeSuccess // 29
+	// Determine the input role; model.Log normalizes it before storage.
+	logType := model.LogTypeProbeSuccess
 	if !probeLog.Success {
-		logType = model.LogTypeProbeFailed // 59
+		logType = model.LogTypeProbeFailed
 	}
 
 	// Build Other field
@@ -291,6 +293,7 @@ func recordProbeLog(probeLog *ProbeLog, requestId string) {
 		RequestId: requestId,
 		Other:     otherStr,
 	}
+	model.ApplyLogTraceFields(log)
 
 	gopool.Go(func() {
 		if err := model.LOG_DB.Create(log).Error; err != nil {

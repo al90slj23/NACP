@@ -19,8 +19,8 @@ func cleanLogs(t *testing.T) {
 // Feature: request-trace-view, Property 1: 链路详情查询过滤与排序
 // For any set of Log records sharing the same request_id with random types (1/2/3/4/5/51/52),
 // calling GetTraceDetail should return steps that:
-// (a) only contain type ∈ {2, 5, 51, 52}
-// (b) are ordered by created_at ASC
+// (a) only contain stored type ∈ {2, 5}; type 51/52 inputs are normalized on write.
+// (b) are ordered by trace_seq ASC when present, otherwise created_at ASC
 // (c) count ≤ 100
 // **Validates: Requirements 1.1**
 func TestTraceProperty1_DetailFilterAndSort(t *testing.T) {
@@ -59,19 +59,32 @@ func TestTraceProperty1_DetailFilterAndSort(t *testing.T) {
 			t.Fatalf("GetTraceDetail error: %v", err)
 		}
 
-		// (a) Only valid types
-		validTypes := map[int]bool{2: true, 5: true, 51: true, 52: true, 29: true, 59: true}
+		// (a) Only valid stored types
+		validTypes := map[int]bool{2: true, 5: true, 4: true}
 		for _, step := range detail.Steps {
 			if !validTypes[step.Type] {
-				t.Fatalf("step has invalid type %d, expected one of {2, 5, 51, 52, 29, 59}", step.Type)
+				t.Fatalf("step has invalid type %d, expected one of {2, 4, 5}", step.Type)
+			}
+			if step.Type == model.LogTypeSystem && step.TraceRole != model.TraceRoleProbeSuccess {
+				t.Fatalf("type=4 trace detail step must be probe_success, got trace_role=%q", step.TraceRole)
 			}
 		}
 
-		// (b) Ordered by created_at ASC
+		// (b) Ordered by trace_seq ASC when present. Fresh writes get trace_seq
+		// in insertion order even if created_at is not monotonic.
 		for i := 1; i < len(detail.Steps); i++ {
-			if detail.Steps[i].CreatedAt < detail.Steps[i-1].CreatedAt {
-				t.Fatalf("steps not ordered by created_at ASC: step[%d].created_at=%d < step[%d].created_at=%d",
-					i, detail.Steps[i].CreatedAt, i-1, detail.Steps[i-1].CreatedAt)
+			prev := detail.Steps[i-1]
+			cur := detail.Steps[i]
+			if prev.TraceSeq > 0 || cur.TraceSeq > 0 {
+				if cur.TraceSeq < prev.TraceSeq {
+					t.Fatalf("steps not ordered by trace_seq ASC: step[%d].trace_seq=%d < step[%d].trace_seq=%d",
+						i, cur.TraceSeq, i-1, prev.TraceSeq)
+				}
+				continue
+			}
+			if cur.CreatedAt < prev.CreatedAt {
+				t.Fatalf("steps not ordered by fallback created_at ASC: step[%d].created_at=%d < step[%d].created_at=%d",
+					i, cur.CreatedAt, i-1, prev.CreatedAt)
 			}
 		}
 
@@ -106,10 +119,20 @@ func TestTraceDetailIncludesProbeLogs(t *testing.T) {
 	if len(detail.Steps) != len(rows) {
 		t.Fatalf("expected %d steps, got %d", len(rows), len(detail.Steps))
 	}
-	expectedTypes := []int{model.LogTypeErrorIntercepted, model.LogTypeProbeSuccess, model.LogTypeProbeFailed, model.LogTypeErrorClientVisible}
+	expectedTypes := []int{model.LogTypeError, model.LogTypeSystem, model.LogTypeError, model.LogTypeError}
+	expectedRoles := []string{model.TraceRoleErrorIntercepted, model.TraceRoleProbeSuccess, model.TraceRoleProbeFailed, model.TraceRoleErrorVisible}
 	for i, expectedType := range expectedTypes {
 		if detail.Steps[i].Type != expectedType {
 			t.Fatalf("step[%d] type: expected %d, got %d", i, expectedType, detail.Steps[i].Type)
+		}
+		if detail.Steps[i].TraceRole != expectedRoles[i] {
+			t.Fatalf("step[%d] trace_role: expected %s, got %s", i, expectedRoles[i], detail.Steps[i].TraceRole)
+		}
+		if detail.Steps[i].RequestId != requestId {
+			t.Fatalf("step[%d] request_id: expected %s, got %s", i, requestId, detail.Steps[i].RequestId)
+		}
+		if detail.Steps[i].Sequence != i+1 {
+			t.Fatalf("step[%d] sequence: expected %d, got %d", i, i+1, detail.Steps[i].Sequence)
 		}
 	}
 }

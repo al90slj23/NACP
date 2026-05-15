@@ -133,48 +133,6 @@ function renderType(type, t) {
           {t('6：退款')}
         </Tag>
       );
-    case 20:
-      return (
-        <Tag color='green' shape='circle'>
-          {t('20：容错重试后成功')}
-        </Tag>
-      );
-    case 21:
-      return (
-        <Tag color='green' shape='circle'>
-          {t('21：容错重试成功')}
-        </Tag>
-      );
-    case 50:
-      return (
-        <Tag color='red' shape='circle'>
-          {t('50：容错重试后失败')}
-        </Tag>
-      );
-    case 51:
-      return (
-        <Tag color='yellow' shape='circle'>
-          {t('51：容错重试已拦截')}
-        </Tag>
-      );
-    case 52:
-      return (
-        <Tag color='red' shape='circle'>
-          {t('52：容错重试客户端可见')}
-        </Tag>
-      );
-    case 29:
-      return (
-        <Tag color='blue' shape='circle'>
-          {t('29：容错探测成功')}
-        </Tag>
-      );
-    case 59:
-      return (
-        <Tag color='grey' shape='circle'>
-          {t('59：容错探测失败')}
-        </Tag>
-      );
     default:
       return (
         <Tag color='grey' shape='circle'>
@@ -293,11 +251,11 @@ function renderFirstUseTime(type, t) {
 }
 
 function isLogMetricType(type) {
-  return [0, 2, 5, 6, 20, 50, 51, 52].includes(type);
+  return [0, 2, 5, 6].includes(type);
 }
 
 function isRelayLogType(type) {
-  return [2, 5, 20, 50, 51, 52].includes(type);
+  return [2, 5].includes(type);
 }
 
 function renderBillingTag(record, t) {

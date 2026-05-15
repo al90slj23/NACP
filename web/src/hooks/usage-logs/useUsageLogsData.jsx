@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Modal } from '@douyinfe/semi-ui';
+import { Modal, Tag, Tooltip } from '@douyinfe/semi-ui';
 import {
   API,
   getTodayStartTimestamp,
@@ -366,6 +366,41 @@ export const useLogsData = () => {
     setShowParamOverrideModal(true);
   };
 
+  const renderCopyableLogId = (id) => {
+    const text = String(id || '');
+    if (!text) {
+      return '-';
+    }
+    const tooltip = (
+      <div style={{ lineHeight: 1.6 }}>
+        <div>Log ID: {text}</div>
+        <div>{t('点击复制')}</div>
+      </div>
+    );
+    return (
+      <Tooltip content={tooltip} position='top'>
+        <Tag
+          color='grey'
+          shape='circle'
+          onClick={async (event) => {
+            event.stopPropagation();
+            if (await copy(text)) {
+              showSuccess(`${t('已复制')} Log ID: ${text}`);
+            } else {
+              Modal.error({
+                title: t('无法复制到剪贴板，请手动复制'),
+                content: text,
+              });
+            }
+          }}
+          style={{ cursor: 'copy' }}
+        >
+          #{text}
+        </Tag>
+      </Tooltip>
+    );
+  };
+
   // Format logs data
   const setLogsFormat = (logs) => {
     const requestConversionDisplayValue = (conversionChain) => {
@@ -388,6 +423,35 @@ export const useLogsData = () => {
         : logs[i].id;
       let other = getLogOther(logs[i].other);
       let expandDataLocal = [];
+
+      if (!logs[i].is_summary) {
+        expandDataLocal.push({
+          key: 'Log ID',
+          value: renderCopyableLogId(logs[i].id),
+        });
+        if (logs[i].trace_id) {
+          expandDataLocal.push({
+            key: 'Trace ID',
+            value: logs[i].trace_id,
+          });
+          expandDataLocal.push({
+            key: 'Trace Seq',
+            value: logs[i].trace_seq || '-',
+          });
+          expandDataLocal.push({
+            key: 'Trace Role',
+            value: logs[i].trace_role || '-',
+          });
+          expandDataLocal.push({
+            key: 'Parent Log ID',
+            value: logs[i].trace_parent_id || '-',
+          });
+          expandDataLocal.push({
+            key: 'Sibling Seq',
+            value: logs[i].trace_sibling_seq || '-',
+          });
+        }
+      }
 
       if (
         isAdminUser &&

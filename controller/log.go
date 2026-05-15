@@ -172,7 +172,7 @@ func DeleteHistoryLogs(c *gin.Context) {
 }
 
 // GetGroupedLogs 处理 GET /api/log/grouped
-// 返回按 request_id 分组的混合日志列表（摘要行 + 普通行）
+// 保留接口路径兼容前端，返回扁平日志列表；链路关系由 trace 字段表达。
 func GetGroupedLogs(c *gin.Context) {
 	// Parse page parameter, default 1
 	page, _ := strconv.Atoi(c.Query("p"))

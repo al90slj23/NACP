@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -36,6 +37,11 @@ type Log struct {
 	Group            string `json:"group" gorm:"index"`
 	Ip               string `json:"ip" gorm:"index;default:''"`
 	RequestId        string `json:"request_id,omitempty" gorm:"type:varchar(64);index:idx_logs_request_id;default:''"`
+	TraceId          string `json:"trace_id,omitempty" gorm:"type:varchar(64);index:idx_logs_trace_id_seq,priority:1;default:''"`
+	TraceSeq         int    `json:"trace_seq,omitempty" gorm:"index:idx_logs_trace_id_seq,priority:2;default:0"`
+	TraceParentId    int    `json:"trace_parent_id,omitempty" gorm:"index;default:0"`
+	TraceSiblingSeq  int    `json:"trace_sibling_seq,omitempty" gorm:"default:0"`
+	TraceRole        string `json:"trace_role,omitempty" gorm:"type:varchar(32);index;default:''"`
 	Other            string `json:"other"`
 }
 
@@ -49,14 +55,119 @@ const (
 	LogTypeError   = 5 // Legacy: all errors (kept for historical data compatibility)
 	LogTypeRefund  = 6
 
-	// NACP: Split error types for better observability
+	// NACP: input-only retry roles. They are normalized before storage; logs.type
+	// remains compatible with legacy NewAPI values.
 	LogTypeErrorIntercepted   = 51 // Error intercepted by retry system (client did NOT see this error)
 	LogTypeErrorClientVisible = 52 // Error returned to client (all retries exhausted)
 
-	// NACP: Probe log types for pre-warm/degraded probe tracking
+	// NACP: input-only probe roles. They are normalized before storage.
 	LogTypeProbeSuccess = 29 // Probe request succeeded (lightweight health check)
 	LogTypeProbeFailed  = 59 // Probe request failed (timeout or non-2xx)
 )
+
+const (
+	TraceRoleConsume          = "consume"
+	TraceRoleErrorLegacy      = "error_legacy"
+	TraceRoleErrorIntercepted = "error_intercepted"
+	TraceRoleErrorVisible     = "error_visible"
+	TraceRoleProbeSuccess     = "probe_success"
+	TraceRoleProbeFailed      = "probe_failed"
+	TraceRoleOther            = "other"
+)
+
+var (
+	traceSeqMu    sync.Mutex
+	traceSeqCache = map[string]int{}
+)
+
+func traceRoleForLogType(logType int) string {
+	switch logType {
+	case LogTypeConsume:
+		return TraceRoleConsume
+	case LogTypeError:
+		return TraceRoleErrorLegacy
+	case LogTypeErrorIntercepted:
+		return TraceRoleErrorIntercepted
+	case LogTypeErrorClientVisible:
+		return TraceRoleErrorVisible
+	case LogTypeProbeSuccess:
+		return TraceRoleProbeSuccess
+	case LogTypeProbeFailed:
+		return TraceRoleProbeFailed
+	default:
+		return TraceRoleOther
+	}
+}
+
+func normalizeLogTypeForStorage(logType int) int {
+	switch logType {
+	case LogTypeErrorIntercepted, LogTypeErrorClientVisible, LogTypeProbeFailed:
+		return LogTypeError
+	case LogTypeProbeSuccess:
+		return LogTypeSystem
+	case 20, 21:
+		return LogTypeConsume
+	case 50:
+		return LogTypeError
+	default:
+		return logType
+	}
+}
+
+func nextTraceSeq(traceId string) int {
+	return nextTraceSeqWithDB(LOG_DB, traceId)
+}
+
+func nextTraceSeqWithDB(db *gorm.DB, traceId string) int {
+	if traceId == "" {
+		return 0
+	}
+
+	traceSeqMu.Lock()
+	defer traceSeqMu.Unlock()
+
+	current := traceSeqCache[traceId]
+	if current == 0 && db != nil {
+		var maxSeq int
+		if err := db.Model(&Log{}).
+			Where("trace_id = ? OR request_id = ?", traceId, traceId).
+			Select("COALESCE(MAX(trace_seq), 0)").
+			Scan(&maxSeq).Error; err == nil && maxSeq > current {
+			current = maxSeq
+		}
+	}
+	current++
+	traceSeqCache[traceId] = current
+	return current
+}
+
+func applyLogTraceFields(log *Log, db *gorm.DB) {
+	if log == nil {
+		return
+	}
+	if log.TraceId == "" {
+		log.TraceId = log.RequestId
+	}
+	if log.TraceRole == "" {
+		log.TraceRole = traceRoleForLogType(log.Type)
+	}
+	log.Type = normalizeLogTypeForStorage(log.Type)
+	if log.TraceSeq == 0 {
+		log.TraceSeq = nextTraceSeqWithDB(db, log.TraceId)
+	}
+}
+
+// ApplyLogTraceFields fills structural trace fields for a flat log row.
+// Logs remain independent DB rows; these fields let readers reconstruct
+// trace membership, logical order, role, and future parent-child links.
+func ApplyLogTraceFields(log *Log) {
+	applyLogTraceFields(log, LOG_DB)
+}
+
+func (log *Log) BeforeCreate(tx *gorm.DB) error {
+	applyLogTraceFields(log, tx)
+	return nil
+}
 
 func formatUserLogs(logs []*Log, startIdx int) {
 	for i := range logs {
@@ -92,6 +203,7 @@ func RecordLog(userId int, logType int, content string) {
 		Type:      logType,
 		Content:   content,
 	}
+	ApplyLogTraceFields(log)
 	err := LOG_DB.Create(log).Error
 	if err != nil {
 		common.SysLog("failed to record log: " + err.Error())
@@ -117,6 +229,7 @@ func RecordLogWithAdminInfo(userId int, logType int, content string, adminInfo m
 		}
 		log.Other = common.MapToJsonStr(other)
 	}
+	ApplyLogTraceFields(log)
 	if err := LOG_DB.Create(log).Error; err != nil {
 		common.SysLog("failed to record log: " + err.Error())
 	}
@@ -144,6 +257,7 @@ func RecordTopupLog(userId int, content string, callerIp string, paymentMethod s
 		Ip:        callerIp,
 		Other:     common.MapToJsonStr(other),
 	}
+	ApplyLogTraceFields(log)
 	err := LOG_DB.Create(log).Error
 	if err != nil {
 		common.SysLog("failed to record topup log: " + err.Error())
@@ -194,6 +308,7 @@ func RecordErrorLogWithType(c *gin.Context, logType int, userId int, channelId i
 		RequestId: requestId,
 		Other:     otherStr,
 	}
+	ApplyLogTraceFields(log)
 	err := LOG_DB.Create(log).Error
 	if err != nil {
 		logger.LogError(c, "failed to record log: "+err.Error())
@@ -255,6 +370,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		RequestId: requestId,
 		Other:     otherStr,
 	}
+	ApplyLogTraceFields(log)
 	err := LOG_DB.Create(log).Error
 	if err != nil {
 		logger.LogError(c, "failed to record log: "+err.Error())
@@ -303,6 +419,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 		Group:     params.Group,
 		Other:     common.MapToJsonStr(params.Other),
 	}
+	ApplyLogTraceFields(log)
 	err := LOG_DB.Create(log).Error
 	if err != nil {
 		common.SysLog("failed to record task billing log: " + err.Error())
