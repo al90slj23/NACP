@@ -3,7 +3,7 @@
 > 基线：`/Volumes/RuiRui4TB/CloudBackup/Mac/code/github/al90slj23/NACP/NewAPIv0.13.2`
 > 基线提交：`bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`
 > 当前分支目标：classic-plus-0.2.0-dev
-> 输入依据：`.ai/L5#Knowledge/nacp-full-changelog-for-review.md`、`.kiro/specs/*/{requirements,design}.md`、当前工作区与 NewAPI v0.13.2 目录 diff
+> 输入依据：`.ai/L5#Knowledge/nacp-full-changelog-review.md`、`.kiro/specs/*/{requirements,design}.md`、当前工作区与 NewAPI v0.13.2 目录 diff
 > 日期：2026-05-15
 
 ## 1. 本次结论先行

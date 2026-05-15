@@ -15,12 +15,12 @@
 - `.ai/L1#Overview/README.md` — L1 说明
 - `.ai/L2#Index/toc.md` — 规范索引
 - `.ai/L2#Index/README.md` — L2 说明
-- `.ai/L3#Standards/standards/01.arch-01.relay-retry.md` — 重试机制设计（待设计）
-- `.ai/L3#Standards/standards/01.arch-02.baseline.md` — 基线版本说明
-- `.ai/L3#Standards/standards/02.dev-01.json-usage.md` — JSON 操作规范
-- `.ai/L3#Standards/standards/02.dev-02.db-compat.md` — 三库兼容规范
-- `.ai/L3#Standards/standards/02.dev-03.dto-pointer.md` — DTO 指针类型规范
-- `.ai/L3#Standards/standards/03.quality-01.git.md` — Git 规范
+- `.ai/L3#Standards/standards/01.arch-01.smart-failover-trace.md` — 重试机制设计（后续迁移命名）
+- `.ai/L3#Standards/standards/01.arch-02.newapi-v0-13-2-baseline.md` — 基线版本说明
+- `.ai/L3#Standards/standards/02.backend-01.json-wrapper-usage.md` — JSON 操作规范
+- `.ai/L3#Standards/standards/02.backend-02.database-compatibility.md` — 三库兼容规范
+- `.ai/L3#Standards/standards/02.backend-03.relay-dto-explicit-zero-values.md` — DTO 指针类型规范
+- `.ai/L3#Standards/standards/06.quality-01.git-workflow.md` — Git 规范
 - `.ai/L4#Changelog/2026-05-13-project-init.md` — 本文件
 - `ZERO/` — ZERO 框架（子目录）
 

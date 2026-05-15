@@ -1,5 +1,43 @@
 # NACP Changelog
 
+## classic-plus-0.2.0-dev (Unreleased)
+
+### Summary
+
+`classic-plus-0.2.0-dev` 从 `classic-plus-0.1.x` 的智能重试基础上，补齐 SFT 结构化日志、旧类型兼容、CAF 测试体系、`.ai` 命名治理和版本发布治理。
+
+### NACP 智能容错链路（SFT）
+
+- 保持 `logs.type` 与 NewAPI 原版类型兼容，避免 `20/21/29/50/51/52/59` 污染旧统计、计费和筛选。
+- 新增结构化链路字段：`trace_id`、`trace_seq`、`trace_parent_id`、`trace_sibling_seq`、`trace_role`。
+- 将容错语义收敛到 `trace_role`：`consume`、`error_intercepted`、`error_visible`、`probe_success`、`probe_failed`。
+- `/api/log/grouped` 回归扁平真实日志行，不再合成 20/50 summary 行。
+- `/api/log/trace` 支持按请求查看完整链路步骤，并返回完整日志字段。
+- 日志展开页显示 Log ID、Trace ID、Trace Seq、Trace Role，并支持点击复制 Log ID。
+
+### NACP CAF 变更验证体系
+
+- 新增 NACP Change Assurance Framework（CAF）标准，用于每次变更后的影响分析、测试计划、执行验证和证据留存。
+- 新增 CAF 执行手册，沉淀影响树、测试表、系统域、上线结论模板。
+
+### AI 记忆体系治理
+
+- 按 ZERO 六层架构规范收敛 `.ai` 文件命名。
+- 新增 `.ai` 命名规范、L3/L4/L5 文件迁移记录。
+
+### 版本与发布
+
+- 将当前开发目标统一为 `classic-plus-0.2.0-dev`。
+- `VERSION` 作为当前构建版本源；正式发布时由 Git tag / GitHub Release 固化。
+
+### Internal References
+
+- `.ai/L5#Knowledge/release-classic-plus-0-2-0-upgrade-review.md`
+- `.ai/L5#Knowledge/sft-smart-failover-trace-analysis.md`
+- `.ai/L5#Knowledge/caf-change-assurance-framework-playbook.md`
+
+---
+
 ## v0.1.0 (2026-05-13)
 
 ### 🎯 智能重试与渠道健康管理

@@ -6,6 +6,195 @@
 
 ---
 
+## 〇、2026-05-15 精读纯化结论
+
+> 本节基于本地 `NewAPIv0.13.2` 源码再次精读，目的是把 NewAPI 原生“重试机制”和 NACP 容错增强边界说清楚。
+
+### 0.1 一句话结论
+
+NewAPI v0.13.2 原生确实有重试机制，但它是**失败后串行重选渠道并重发完整请求**；不是 NACP 目标里的**同渠道重试 + 候选渠道提前探测 + 链路结构化 + 最终状态可观测**。
+
+### 0.2 NewAPI 原生重试到底是什么
+
+主入口在 `NewAPIv0.13.2/controller/relay.go`：
+
+```go
+for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+    channel, channelErr := getChannel(c, relayInfo, retryParam)
+    // restore request body
+    newAPIError = relayHandler(...)
+    if newAPIError == nil { return }
+    processChannelError(...)
+    if !shouldRetry(...) { break }
+}
+```
+
+它的实际行为：
+
+1. 第一次请求使用 `retry=0` 选中的渠道。
+2. 上游失败后，先记录错误、可能自动禁用渠道。
+3. `shouldRetry` 判断状态码/错误类型是否允许继续。
+4. 如果允许，下一轮用 `retry=1/2/...` 再选渠道。
+5. 每一轮都是完整真实请求，不存在轻量探测请求。
+6. 成功则直接返回客户端；最终失败才返回错误。
+
+### 0.3 默认情况下为什么看起来“没用”
+
+默认重试次数是：
+
+```go
+var RetryTimes = 0
+```
+
+位置：`NewAPIv0.13.2/common/constants.go`
+
+所以默认只会跑：
+
+```text
+retry = 0
+```
+
+如果后台没有把“失败重试次数”配置为大于 0，原生机制不会发生第二次真实重试。
+
+### 0.4 它怎么换渠道
+
+渠道选择由 `service.CacheGetRandomSatisfiedChannel` 和 `model.GetRandomSatisfiedChannel` 完成。
+
+普通分组：
+
+```text
+retry=0 -> 最高 priority
+retry=1 -> 第二档 priority
+retry=2 -> 第三档 priority
+retry 超过 priority 数量 -> 使用最低 priority
+```
+
+同一 priority 内是按 weight 随机选一个渠道。
+
+关键限制：
+
+- 不记录“本次请求已经试过哪些具体渠道”来做严格排除。
+- 同 priority 下再次选择时，理论上可能随机到已失败渠道。
+- 没有“先探测候选渠道健康度，再决定下一个真实请求发给谁”。
+- 没有把 A1/A2/B1-/C1- 这类步骤结构化落到链路字段。
+
+### 0.5 auto 分组与跨分组重试
+
+`auto` 分组下，NewAPI 有跨分组重试设计：
+
+```text
+GroupA priority0
+GroupA priority1
+GroupA exhausted -> GroupB priority0
+GroupB priority1
+```
+
+但它仍是串行尝试：
+
+```text
+A 失败后，下一轮才考虑 B
+```
+
+不是：
+
+```text
+A 失败时，同时轻量探测 B/C，提前判断哪个健康
+```
+
+### 0.6 shouldRetry 的边界
+
+`shouldRetry` 主要看：
+
+- 是否还有剩余 retry 次数
+- 是否指定了 specific channel
+- 是否是 SkipRetry 错误
+- 是否是 2xx
+- 是否是非标准状态码
+- 是否命中永不重试错误码
+- 是否命中自动重试状态码范围
+
+默认自动重试状态码：
+
+```text
+100-199
+300-399
+401-407
+409-499
+500-503
+505-523
+525-599
+```
+
+默认永不重试：
+
+```text
+504
+524
+ErrorCodeBadResponseBody
+```
+
+默认不包含：
+
+```text
+400
+408
+```
+
+其中 `429` 默认会重试。
+
+### 0.7 原生日志能看到什么、看不到什么
+
+NewAPI 原生失败时会写错误日志，并在 `other.admin_info.use_channel` 里保存用过的渠道列表。
+
+能看到：
+
+```text
+这次请求尝试过哪些 channel id
+某一条错误日志的 status_code / channel / error_code
+```
+
+看不到：
+
+```text
+哪条错误是“已拦截，不返回用户”
+哪条错误是“最终客户端可见”
+哪条是轻量探测成功/失败
+完整链路的严格父子关系
+同级步骤顺序
+容错最终成功/失败的结构化状态
+```
+
+所以旧 NewAPI 日志不应强行推断 NACP 容错链路。老日志只需要按旧类型正常展示兼容。
+
+### 0.8 NACP 增强不是重复造轮子
+
+NewAPI 原生重试解决的是：
+
+```text
+失败后，要不要串行换一个渠道再完整重发？
+```
+
+NACP 增强要解决的是：
+
+```text
+A 失败后，如何拦截错误不立刻返回用户？
+A 是否要做同渠道重试？
+B/C 是否可以提前轻量探测健康状态？
+当 A2/A3 和 B1-/C1- 回包先后不同，如何决策？
+每个步骤如何结构化还原成一个严谨链路？
+如何避免污染 logs.type，同时保留可搜索/可展示语义？
+```
+
+### 0.9 当前设计原则
+
+1. `logs.type` 保持 NewAPI 老类型，用于兼容、计费、统计、旧日志显示。
+2. NACP 容错语义进入 `trace_*` 字段，例如 `trace_id / trace_seq / trace_role`。
+3. 老日志不做容错链路推断，只按原始日志正常显示。
+4. 新日志一行仍是一条独立真实日志，链路由结构字段还原。
+5. `20/50/51/52/21/29/59` 可以作为“语义筛选/展示概念”，但不应作为 `logs.type` 的真实落库值。
+
+---
+
 ## 一、请求生命周期总览
 
 ```
@@ -265,8 +454,10 @@ model.RecordErrorLog(c, userId, channelId, modelName, tokenName,
 |------|------|------|
 | 重试次数 | 全局统一 `RetryTimes`（默认 0） | 按渠道/模型可配置 |
 | 重试策略 | 立即重试，无退避 | 支持指数退避 + 抖动 |
-| 同优先级重试 | 不支持（同优先级只选一次） | 同优先级内也应尝试其他渠道 |
+| 已尝试渠道排除 | 无严格排除；同优先级随机选择可能再次命中已失败渠道 | 同一链路内应有 tried-channel 集合，避免无意义重复 |
+| 候选健康预判 | 无；下一轮才完整请求下一个渠道 | A 失败后并发轻量探测 B/C，提前选择更健康候选 |
 | 错误分类 | 粗粒度（状态码范围） | 细粒度（区分临时性/永久性） |
+| 链路结构化 | 只有 `admin_info.use_channel` 这种弱痕迹 | 需要 `trace_id/trace_seq/trace_role` 严格还原 |
 | 流式请求 | 中断后无法重试 | 需要特殊处理 |
 | 客户感知 | 重试失败后返回错误 | 应尽量透明，最多延迟 |
 
@@ -326,4 +517,4 @@ model.RecordErrorLog(c, userId, channelId, modelName, tokenName,
 
 ---
 
-**最后更新**：2026-05-13
+**最后更新**：2026-05-15

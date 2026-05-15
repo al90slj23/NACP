@@ -1,0 +1,42 @@
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+    authors:
+      - dependabot
+  categories:
+    - title: Features
+      labels:
+        - feat
+        - feature
+        - enhancement
+    - title: Fixes
+      labels:
+        - fix
+        - bug
+        - bugfix
+    - title: Reliability
+      labels:
+        - reliability
+        - retry
+        - failover
+        - observability
+    - title: Billing and Logs
+      labels:
+        - billing
+        - usage
+        - logs
+        - trace
+    - title: Testing and Release
+      labels:
+        - test
+        - qa
+        - release
+        - caf
+    - title: Documentation
+      labels:
+        - docs
+        - documentation
+    - title: Other Changes
+      labels:
+        - "*"

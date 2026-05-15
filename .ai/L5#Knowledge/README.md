@@ -1,7 +1,7 @@
 # L5#知识图谱 (Knowledge)
 
 > **版本**：v1.0.0
-> **最后更新**：2026-05-13
+> **最后更新**：2026-05-15
 
 ---
 
@@ -11,12 +11,24 @@
 
 ---
 
-## 待补充
+## 重点文档
 
-- NewAPI relay 核心流程分析
-- 各供应商错误码映射
-- 重试策略技术调研
+- [NACP 智能容错链路（Smart Failover Trace, SFT）](./sft-smart-failover-trace-analysis.md)
+- [NewAPI 原生重试机制分析](./newapi-relay-retry-mechanism-analysis.md)
+- [NACP 完整更新 Changelog 评审稿](./nacp-full-changelog-review.md)
+- [NACP 在线测试执行计划](./test-nacp-online-execution-plan.md)
+- [NewAPI v0.13.2 回归测试计划](./test-newapi-v0-13-2-regression-plan.md)
+- [NACP CAF 执行手册](./caf-change-assurance-framework-playbook.md)
+- [classic-plus-0.1.x -> classic-plus-0.2.0 升级说明](./release-classic-plus-0-2-0-upgrade-review.md)
 
 ---
 
-**最后更新**：2026-05-13
+## 待补充
+
+- 各供应商错误码映射
+- SFT trace_role 独立筛选方案
+- SFT trace_parent_id / trace_sibling_seq 树形链路落地方案
+
+---
+
+**最后更新**：2026-05-15

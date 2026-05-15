@@ -1,6 +1,6 @@
 # NACP 测试执行计划
 
-> 目的：把 `nacp-v0.13.2-regression-test-plan.md` 落成下一步可直接执行、分工、记录结果的测试方案。
+> 目的：把 `test-newapi-v0-13-2-regression-plan.md` 落成下一步可直接执行、分工、记录结果的测试方案。
 > 基线：NewAPI `v0.13.2`，commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`
 > 当前目标：NACP classic-plus-0.2.0-dev
 > 测试环境：在线服务器 `143.198.87.200` / `https://nacp.m.srl`

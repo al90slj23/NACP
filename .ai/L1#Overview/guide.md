@@ -1,7 +1,7 @@
 # NACP — NewAPI Classic Plus
 
 > **定位**：基于 QuantumNous/new-api v0.13.2 经典版本线的最终增强版
-> **版本**：classic-plus-0.1.0
+> **版本**：classic-plus-0.2.0-dev
 > **创建日期**：2026-05-13
 > **英文定位语**：The final enhanced edition of NewAPI Classic.
 
