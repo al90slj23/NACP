@@ -144,13 +144,19 @@ const LogsFilters = ({
             >
               <Form.Select.Option value='0'>{t('全部')}</Form.Select.Option>
               <Form.Select.Option value='1'>{t('充值')}</Form.Select.Option>
-              <Form.Select.Option value='2'>{t('消费')}</Form.Select.Option>
+              <Form.Select.Option value='2'>
+                {t('2：正常消费成功')}
+              </Form.Select.Option>
               <Form.Select.Option value='3'>{t('管理')}</Form.Select.Option>
               <Form.Select.Option value='4'>{t('系统')}</Form.Select.Option>
               <Form.Select.Option value='5'>{t('错误')}</Form.Select.Option>
               <Form.Select.Option value='6'>{t('退款')}</Form.Select.Option>
-              <Form.Select.Option value='51'>{t('错误(已拦截)')}</Form.Select.Option>
-              <Form.Select.Option value='52'>{t('错误(客户可见)')}</Form.Select.Option>
+              <Form.Select.Option value='51'>
+                {t('51：容错重试已拦截')}
+              </Form.Select.Option>
+              <Form.Select.Option value='52'>
+                {t('52：容错重试客户端可见')}
+              </Form.Select.Option>
             </Form.Select>
           </div>
 

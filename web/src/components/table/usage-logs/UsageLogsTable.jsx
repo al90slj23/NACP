@@ -87,7 +87,12 @@ const LogsTable = (logsData) => {
 
   const expandRowRender = (record, index) => {
     if (record.is_summary === true) {
-      return <TraceExpandRender requestId={record.request_id} />;
+      return (
+        <TraceExpandRender
+          requestId={record.request_id}
+          billingDisplayMode={billingDisplayMode}
+        />
+      );
     }
     return <Descriptions data={expandData[record.key]} />;
   };

@@ -100,67 +100,85 @@ function renderType(type, t) {
     case 1:
       return (
         <Tag color='cyan' shape='circle'>
-          {t('充值')}
+          {t('1：充值')}
         </Tag>
       );
     case 2:
       return (
         <Tag color='lime' shape='circle'>
-          {t('消费')}
+          {t('2：正常消费成功')}
         </Tag>
       );
     case 3:
       return (
         <Tag color='orange' shape='circle'>
-          {t('管理')}
+          {t('3：管理操作')}
         </Tag>
       );
     case 4:
       return (
         <Tag color='purple' shape='circle'>
-          {t('系统')}
+          {t('4：系统日志')}
         </Tag>
       );
     case 5:
       return (
         <Tag color='red' shape='circle'>
-          {t('错误')}
+          {t('5：普通错误')}
         </Tag>
       );
     case 6:
       return (
         <Tag color='teal' shape='circle'>
-          {t('退款')}
-        </Tag>
-      );
-    case 51:
-      return (
-        <Tag color='yellow' shape='circle'>
-          {t('已拦截')}
+          {t('6：退款')}
         </Tag>
       );
     case 20:
       return (
         <Tag color='green' shape='circle'>
-          {t('成功(重试)')}
+          {t('20：容错重试后成功')}
+        </Tag>
+      );
+    case 21:
+      return (
+        <Tag color='green' shape='circle'>
+          {t('21：任务消费成功')}
         </Tag>
       );
     case 50:
       return (
         <Tag color='red' shape='circle'>
-          {t('失败(重试)')}
+          {t('50：容错重试后失败')}
+        </Tag>
+      );
+    case 51:
+      return (
+        <Tag color='yellow' shape='circle'>
+          {t('51：容错重试已拦截')}
         </Tag>
       );
     case 52:
       return (
         <Tag color='red' shape='circle'>
-          {t('客户可见')}
+          {t('52：容错重试客户端可见')}
+        </Tag>
+      );
+    case 29:
+      return (
+        <Tag color='blue' shape='circle'>
+          {t('29：容错探测成功')}
+        </Tag>
+      );
+    case 59:
+      return (
+        <Tag color='grey' shape='circle'>
+          {t('59：容错探测失败')}
         </Tag>
       );
     default:
       return (
         <Tag color='grey' shape='circle'>
-          {t('未知')}
+          {t('未知') + `(${type})`}
         </Tag>
       );
   }
