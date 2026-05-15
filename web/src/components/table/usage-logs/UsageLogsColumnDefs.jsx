@@ -142,7 +142,7 @@ function renderType(type, t) {
     case 21:
       return (
         <Tag color='green' shape='circle'>
-          {t('21：任务消费成功')}
+          {t('21：容错重试成功')}
         </Tag>
       );
     case 50:

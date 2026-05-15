@@ -19,7 +19,7 @@ import {
 const stepConfig = {
   2: { label: '2：正常消费成功', color: 'lime' },
   20: { label: '20：容错重试后成功', color: 'green' },
-  21: { label: '21：任务消费成功', color: 'green' },
+  21: { label: '21：容错重试成功', color: 'green' },
   29: { label: '29：容错探测成功', color: 'blue' },
   50: { label: '50：容错重试后失败', color: 'red' },
   51: { label: '51：容错重试已拦截', color: 'yellow' },
@@ -230,6 +230,13 @@ function TypeTag({ type, t }) {
   );
 }
 
+function getTraceStepDisplayType(type) {
+  // The persisted consume log is still type=2 for billing/statistics. Inside a
+  // retry summary trace it represents the final retry success, so display it as
+  // 21 to avoid confusing it with a direct no-retry consume success.
+  return type === 2 ? 21 : type;
+}
+
 function TraceCell({ children, className = '', style = {} }) {
   return (
     <div
@@ -328,6 +335,7 @@ const TraceExpandRender = ({ requestId, billingDisplayMode = 'price' }) => {
       {steps.map((step, idx) => {
         const isLast = idx === steps.length - 1;
         const prefix = isLast ? '└── ' : '├── ';
+        const displayType = getTraceStepDisplayType(step.type);
         const other = getLogOther(step.other);
         const retryPath = Array.isArray(other?.admin_info?.use_channel)
           ? other.admin_info.use_channel.join('->')
@@ -401,7 +409,7 @@ const TraceExpandRender = ({ requestId, billingDisplayMode = 'price' }) => {
                 {step.group ? renderGroup(step.group) : '-'}
               </TraceCell>
               <TraceCell>
-                <TypeTag type={step.type} t={t} />
+                <TypeTag type={displayType} t={t} />
                 {step.status_code != null && (
                   <Tag
                     color='light-blue'
