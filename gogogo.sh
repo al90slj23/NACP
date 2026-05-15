@@ -12,7 +12,7 @@ set +e  # Don't exit on error — we handle errors explicitly
 
 # ─── 配置 ─────────────────────────────────────────────────────────────────────
 IMAGE="ghcr.io/al90slj23/nacp:main"
-DEPLOY_SERVER="143.198.87.200"
+DEPLOY_SERVER="nacp.m.srl"
 DEPLOY_USER="root"
 DEPLOY_DIR="/opt/nacp"
 COMPOSE_FILE="docker-compose.yml"
