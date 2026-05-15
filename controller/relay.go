@@ -173,13 +173,15 @@ func selectPreWarmChannels(group string, modelName string, retryIndex int, realT
 	}
 
 	channels := make([]*model.Channel, 0, count)
-	for len(channels) < count {
-		candidate, _ := model.GetRandomSatisfiedChannel(group, modelName, retryIndex, excluded)
-		if candidate == nil || excluded[candidate.Id] {
-			break
+	for priorityRetry := retryIndex; priorityRetry <= common.RetryTimes && len(channels) < count; priorityRetry++ {
+		for len(channels) < count {
+			candidate, _ := model.GetRandomSatisfiedChannel(group, modelName, priorityRetry, excluded)
+			if candidate == nil || excluded[candidate.Id] {
+				break
+			}
+			channels = append(channels, candidate)
+			excluded[candidate.Id] = true
 		}
-		channels = append(channels, candidate)
-		excluded[candidate.Id] = true
 	}
 	return channels
 }
