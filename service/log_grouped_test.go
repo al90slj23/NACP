@@ -91,6 +91,56 @@ func TestGroupedLogsReturnsFlatRowsAndNormalizesTraceTypes(t *testing.T) {
 	require.Equal(t, model.TraceRoleErrorIntercepted, items[4].TraceRole)
 }
 
+func TestGroupedLogsExcludesStandaloneProbeRowsByDefault(t *testing.T) {
+	cleanLogs(t)
+	require.NoError(t, model.LOG_DB.Exec("DELETE FROM logs").Error)
+
+	insertGroupedLogTestRow(t, model.Log{
+		Type:      model.LogTypeProbeSuccess,
+		CreatedAt: 400,
+		ChannelId: 13,
+		Content:   "standalone probe success",
+	})
+	insertGroupedLogTestRow(t, model.Log{
+		Type:      model.LogTypeProbeFailed,
+		CreatedAt: 401,
+		ChannelId: 14,
+		Content:   "standalone probe failed",
+	})
+	insertGroupedLogTestRow(t, model.Log{
+		RequestId: "trace_with_probe",
+		Type:      model.LogTypeProbeFailed,
+		CreatedAt: 402,
+		ChannelId: 14,
+		Content:   "trace probe failed",
+	})
+	insertGroupedLogTestRow(t, model.Log{
+		RequestId: "trace_with_probe",
+		Type:      model.LogTypeConsume,
+		CreatedAt: 403,
+		ChannelId: 13,
+		Content:   "trace consume",
+	})
+
+	items, total, err := GetGroupedLogs(GroupedLogParams{Page: 1, PageSize: 20})
+	require.NoError(t, err)
+	require.EqualValues(t, 2, total)
+	require.Len(t, items, 2)
+	for _, item := range items {
+		require.Equal(t, "trace_with_probe", item.RequestId)
+		require.NotEmpty(t, item.TraceId)
+	}
+
+	items, total, err = GetGroupedLogs(GroupedLogParams{
+		Page:      1,
+		PageSize:  20,
+		RequestId: "trace_with_probe",
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 2, total)
+	require.Len(t, items, 2)
+}
+
 func TestGroupedLogsFiltersFlatRowsByRequestAndChannel(t *testing.T) {
 	cleanLogs(t)
 	require.NoError(t, model.LOG_DB.Exec("DELETE FROM logs").Error)

@@ -43,6 +43,167 @@ import { ITEMS_PER_PAGE } from '../../constants';
 import { useTableCompactMode } from '../common/useTableCompactMode';
 import ParamOverrideEntry from '../../components/table/usage-logs/components/ParamOverrideEntry';
 
+const SFT_TRACE_ROLES = new Set([
+  'consume',
+  'error_intercepted',
+  'error_visible',
+  'probe_success',
+  'probe_failed',
+]);
+
+const SFT_CHAIN_ROLES = new Set([
+  'error_intercepted',
+  'error_visible',
+  'probe_success',
+  'probe_failed',
+]);
+
+function getTraceGroupKey(log) {
+  if (!log) {
+    return '';
+  }
+  return log.trace_id || log.request_id || '';
+}
+
+function isSftTraceCandidate(log) {
+  if (!log) {
+    return false;
+  }
+  if (SFT_TRACE_ROLES.has(log.trace_role)) {
+    return true;
+  }
+  return Boolean(log.trace_id && log.trace_seq > 1);
+}
+
+function sortTraceStepsAsc(a, b) {
+  const seqA = Number(a.trace_seq || 0);
+  const seqB = Number(b.trace_seq || 0);
+  if (seqA !== seqB) {
+    return seqA - seqB;
+  }
+  const siblingA = Number(a.trace_sibling_seq || 0);
+  const siblingB = Number(b.trace_sibling_seq || 0);
+  if (siblingA !== siblingB) {
+    return siblingA - siblingB;
+  }
+  return Number(a.id || 0) - Number(b.id || 0);
+}
+
+function latestStep(steps, predicate) {
+  for (let i = steps.length - 1; i >= 0; i--) {
+    if (predicate(steps[i])) {
+      return steps[i];
+    }
+  }
+  return null;
+}
+
+function buildTraceSummaryRow(groupSteps, groupIndex) {
+  const steps = [...groupSteps].sort(sortTraceStepsAsc);
+  const visibleError = latestStep(
+    steps,
+    (step) => step.trace_role === 'error_visible',
+  );
+  const consume = latestStep(steps, (step) => step.trace_role === 'consume');
+  const hasChainEvidence =
+    steps.length > 1 ||
+    steps.some((step) => SFT_CHAIN_ROLES.has(step.trace_role)) ||
+    steps.some((step) => Number(step.trace_seq || 0) > 1);
+  const hasTerminalEvidence =
+    visibleError ||
+    (consume && Number(consume.trace_seq || 0) > 1) ||
+    (consume && steps.some((step) => SFT_CHAIN_ROLES.has(step.trace_role)));
+  if (!hasChainEvidence || !hasTerminalEvidence) {
+    return null;
+  }
+
+  const terminal = visibleError || consume || steps[steps.length - 1];
+  const succeeded = Boolean(consume && !visibleError);
+  const channelPath = [
+    ...new Set(
+      steps
+        .map((step) => step.channel)
+        .filter(
+          (channel) =>
+            channel !== undefined && channel !== null && channel !== 0,
+        )
+        .map(String),
+    ),
+  ].join('→');
+  const startAt = Math.min(
+    ...steps.map((step) => Number(step.created_at || 0)),
+  );
+  const endAt = Math.max(...steps.map((step) => Number(step.created_at || 0)));
+  const metricSource = succeeded ? consume : terminal;
+
+  return {
+    ...terminal,
+    key: `summary_${getTraceGroupKey(terminal) || terminal.id || 'empty'}_${groupIndex}`,
+    is_summary: true,
+    sft_summary: true,
+    display_type: succeeded ? 20 : 50,
+    trace_role: succeeded ? 'summary_success' : 'summary_failed',
+    trace_step_count: steps.length,
+    channel_path: channelPath || String(terminal.channel || ''),
+    total_duration: Math.max(terminal.use_time || 0, endAt - startAt),
+    quota: succeeded ? metricSource?.quota || 0 : 0,
+    prompt_tokens: succeeded ? metricSource?.prompt_tokens || 0 : 0,
+    completion_tokens: succeeded ? metricSource?.completion_tokens || 0 : 0,
+    use_time: metricSource?.use_time || terminal.use_time || 0,
+    model_name: metricSource?.model_name || terminal.model_name,
+    username: metricSource?.username || terminal.username,
+    token_name: metricSource?.token_name || terminal.token_name,
+    group: metricSource?.group || terminal.group,
+    ip: succeeded ? metricSource?.ip || terminal.ip : terminal.ip,
+    other: metricSource?.other || terminal.other,
+    content: succeeded
+      ? metricSource?.content || terminal.content
+      : terminal.content,
+  };
+}
+
+function buildTraceGroupedRows(rawLogs) {
+  const groups = new Map();
+  for (const log of rawLogs) {
+    const key = getTraceGroupKey(log);
+    if (!key || !isSftTraceCandidate(log)) {
+      continue;
+    }
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+    groups.get(key).push(log);
+  }
+
+  const summaries = new Map();
+  let summaryIndex = 0;
+  for (const [key, groupSteps] of groups.entries()) {
+    const summary = buildTraceSummaryRow(groupSteps, summaryIndex);
+    if (summary) {
+      summaries.set(key, summary);
+      summaryIndex += 1;
+    }
+  }
+
+  const emitted = new Set();
+  const rows = [];
+  for (const log of rawLogs) {
+    const key = getTraceGroupKey(log);
+    if (summaries.has(key)) {
+      if (!emitted.has(key)) {
+        rows.push(summaries.get(key));
+        emitted.add(key);
+      }
+      continue;
+    }
+    if (isSftTraceCandidate(log) && SFT_CHAIN_ROLES.has(log.trace_role)) {
+      continue;
+    }
+    rows.push(log);
+  }
+  return rows;
+}
+
 export const useLogsData = () => {
   const { t } = useTranslation();
 
@@ -402,7 +563,8 @@ export const useLogsData = () => {
   };
 
   // Format logs data
-  const setLogsFormat = (logs) => {
+  const setLogsFormat = (rawLogs) => {
+    const logs = buildTraceGroupedRows(rawLogs || []);
     const requestConversionDisplayValue = (conversionChain) => {
       const chain = Array.isArray(conversionChain)
         ? conversionChain.filter(Boolean)

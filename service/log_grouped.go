@@ -107,6 +107,11 @@ func GetGroupedLogs(params GroupedLogParams) ([]GroupedLogItem, int64, error) {
 	}
 	if params.RequestId != "" {
 		tx = tx.Where("request_id = ?", params.RequestId)
+	} else {
+		tx = tx.Where("NOT (request_id = '' AND trace_role IN ?)", []string{
+			model.TraceRoleProbeSuccess,
+			model.TraceRoleProbeFailed,
+		})
 	}
 	tx = applyCommonFilters(tx, params)
 

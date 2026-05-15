@@ -1,5 +1,31 @@
+/*
+Copyright (C) 2025 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
+
 import React, { useState, useEffect } from 'react';
-import { Spin, Tag, Empty, Typography, Tooltip, Toast } from '@douyinfe/semi-ui';
+import {
+  Spin,
+  Tag,
+  Empty,
+  Typography,
+  Tooltip,
+  Toast,
+} from '@douyinfe/semi-ui';
 import { useTranslation } from 'react-i18next';
 import {
   API,
@@ -21,6 +47,11 @@ const stepConfig = {
   2: { label: '2：正常消费成功', color: 'lime' },
   4: { label: '4：系统日志', color: 'purple' },
   5: { label: '5：普通错误', color: 'red' },
+  21: { label: '21：容错重试成功', color: 'lime' },
+  29: { label: '29：容错探测成功', color: 'cyan' },
+  51: { label: '51：容错重试已拦截', color: 'yellow' },
+  52: { label: '52：容错重试客户端可见', color: 'red' },
+  59: { label: '59：容错探测失败', color: 'red' },
 };
 
 const colors = [
@@ -291,8 +322,24 @@ function TypeTag({ type, t }) {
   );
 }
 
-function getTraceStepDisplayType(type) {
-  return type;
+function getTraceStepDisplayType(step) {
+  if (!step) {
+    return 0;
+  }
+  switch (step.trace_role) {
+    case 'consume':
+      return step.trace_seq > 1 ? 21 : 2;
+    case 'error_intercepted':
+      return 51;
+    case 'error_visible':
+      return 52;
+    case 'probe_success':
+      return 29;
+    case 'probe_failed':
+      return 59;
+    default:
+      return step.type;
+  }
 }
 
 function TraceCell({ children, className = '', style = {} }) {
@@ -393,7 +440,7 @@ const TraceExpandRender = ({ requestId, billingDisplayMode = 'price' }) => {
       {steps.map((step, idx) => {
         const isLast = idx === steps.length - 1;
         const prefix = isLast ? '└── ' : '├── ';
-        const displayType = getTraceStepDisplayType(step.type);
+        const displayType = getTraceStepDisplayType(step);
         const other = getLogOther(step.other);
         const retryPath = Array.isArray(other?.admin_info?.use_channel)
           ? other.admin_info.use_channel.join('->')

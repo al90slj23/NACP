@@ -157,13 +157,6 @@ func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usag
 
 func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, modelName string,
 	usage *dto.RealtimeUsage, extraContent string) {
-
-	if err := RequestContextErr(ctx); err != nil {
-		MarkBillingSkippedRequestCanceled(ctx)
-		logger.LogWarn(ctx, fmt.Sprintf("skip realtime quota settlement because request context is done: %s", err.Error()))
-		return
-	}
-
 	var tieredResult *billingexpr.TieredResult
 	tieredOk, tieredQuota, tieredRes := TryTieredSettle(relayInfo, billingexpr.TokenParams{
 		P:   float64(usage.InputTokens),
@@ -286,12 +279,6 @@ func CalcOpenRouterCacheCreateTokens(usage dto.Usage, priceData types.PriceData)
 }
 
 func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent string) {
-	if err := RequestContextErr(ctx); err != nil {
-		MarkBillingSkippedRequestCanceled(ctx)
-		logger.LogWarn(ctx, fmt.Sprintf("skip audio quota settlement because request context is done: %s", err.Error()))
-		return
-	}
-
 	var tieredUsedVars map[string]bool
 	if snap := relayInfo.TieredBillingSnapshot; snap != nil {
 		tieredUsedVars = billingexpr.UsedVars(snap.ExprString)

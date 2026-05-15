@@ -137,6 +137,81 @@ func TestTraceDetailIncludesProbeLogs(t *testing.T) {
 	}
 }
 
+func TestTraceListCollapsesProbeRowsIntoSingleSummary(t *testing.T) {
+	cleanLogs(t)
+	model.LOG_DB.Exec("DELETE FROM logs")
+
+	const requestId = "trace_list_probe_principal_split"
+	rows := []model.Log{
+		{
+			RequestId: requestId,
+			Type:      model.LogTypeErrorIntercepted,
+			CreatedAt: 100,
+			ChannelId: 12,
+			ModelName: "claude-haiku-4-5-20251001",
+			Username:  "trace_user",
+			TokenName: "trace_token",
+		},
+		{
+			RequestId: requestId,
+			Type:      model.LogTypeProbeFailed,
+			CreatedAt: 101,
+			ChannelId: 14,
+			ModelName: "claude-haiku-4-5-20251001",
+		},
+		{
+			RequestId:        requestId,
+			Type:             model.LogTypeConsume,
+			CreatedAt:        102,
+			ChannelId:        13,
+			ModelName:        "claude-haiku-4-5-20251001",
+			Username:         "trace_user",
+			TokenName:        "trace_token",
+			Quota:            111,
+			PromptTokens:     121,
+			CompletionTokens: 20,
+		},
+	}
+	for _, row := range rows {
+		if err := model.LOG_DB.Create(&row).Error; err != nil {
+			t.Fatalf("failed to insert log: %v", err)
+		}
+	}
+
+	results, total, err := GetTraceList(TraceListParams{Page: 1, PageSize: 20})
+	if err != nil {
+		t.Fatalf("GetTraceList error: %v", err)
+	}
+
+	matches := make([]TraceSummary, 0)
+	for _, result := range results {
+		if result.RequestId == requestId {
+			matches = append(matches, result)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected one summary for request_id %s, got %d: %#v", requestId, len(matches), matches)
+	}
+	if total != 1 {
+		t.Fatalf("expected total=1, got %d", total)
+	}
+
+	summary := matches[0]
+	if summary.Status != "success" {
+		t.Fatalf("expected status success, got %q", summary.Status)
+	}
+	if summary.Username != "trace_user" || summary.TokenName != "trace_token" {
+		t.Fatalf("expected principal trace_user/trace_token, got %q/%q", summary.Username, summary.TokenName)
+	}
+	if summary.ChannelCount != 3 {
+		t.Fatalf("expected channel_count=3, got %d", summary.ChannelCount)
+	}
+	if summary.TotalQuota != 111 || summary.TotalPromptTokens != 121 || summary.TotalCompletionTokens != 20 {
+		t.Fatalf("unexpected totals: quota=%d prompt=%d completion=%d",
+			summary.TotalQuota, summary.TotalPromptTokens, summary.TotalCompletionTokens)
+	}
+}
+
 // Feature: request-trace-view, Property 2: Other 字段 status_code 解析
 // For any Log record, if Other is valid JSON with admin_info.status_code numeric field,
 // the corresponding TraceStep.StatusCode should equal that value;

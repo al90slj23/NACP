@@ -99,9 +99,9 @@ func GetTraceList(params TraceListParams) ([]TraceSummary, int64, error) {
 		request_id,
 		MIN(created_at) AS created_at,
 		MAX(created_at) AS max_created_at,
-		model_name,
-		username,
-		token_name,
+		MAX(CASE WHEN model_name <> '' THEN model_name ELSE '' END) AS model_name,
+		MAX(CASE WHEN username <> '' THEN username ELSE '' END) AS username,
+		MAX(CASE WHEN token_name <> '' THEN token_name ELSE '' END) AS token_name,
 		COUNT(DISTINCT channel_id) AS channel_count,
 		MAX(CASE WHEN type = 2 THEN 1 ELSE 0 END) AS has_success,
 		SUM(CASE WHEN type = 2 THEN quota ELSE 0 END) AS total_quota,
@@ -114,7 +114,7 @@ func GetTraceList(params TraceListParams) ([]TraceSummary, int64, error) {
 	// Build WHERE conditions
 	tx := model.LOG_DB.Table("logs").
 		Select(selectSQL).
-		Where("type IN (2, 5, 51, 52)").
+		Where("(type IN (2, 5, 51, 52) OR (type = 4 AND trace_role = ?))", model.TraceRoleProbeSuccess).
 		Where("request_id != ''")
 
 	if params.StartTimestamp != 0 {
@@ -130,7 +130,7 @@ func GetTraceList(params TraceListParams) ([]TraceSummary, int64, error) {
 		tx = tx.Where("username = ?", params.Username)
 	}
 
-	tx = tx.Group("request_id, model_name, username, token_name").
+	tx = tx.Group("request_id").
 		Having("log_count >= 2 OR has_error = 1")
 
 	// Count total matching records using a subquery approach

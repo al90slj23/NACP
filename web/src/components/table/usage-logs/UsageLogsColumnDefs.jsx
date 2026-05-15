@@ -94,9 +94,34 @@ function buildChannelAffinityTooltip(affinity, t) {
   );
 }
 
+function getUsageLogDisplayType(type, record = {}) {
+  if (record.display_type) {
+    return record.display_type;
+  }
+  switch (record.trace_role) {
+    case 'summary_success':
+      return 20;
+    case 'summary_failed':
+      return 50;
+    case 'consume':
+      return record.trace_seq > 1 ? 21 : 2;
+    case 'error_intercepted':
+      return 51;
+    case 'error_visible':
+      return 52;
+    case 'probe_success':
+      return 29;
+    case 'probe_failed':
+      return 59;
+    default:
+      return type;
+  }
+}
+
 // Render functions
-function renderType(type, t) {
-  switch (type) {
+function renderType(type, t, record = {}) {
+  const displayType = getUsageLogDisplayType(type, record);
+  switch (displayType) {
     case 1:
       return (
         <Tag color='cyan' shape='circle'>
@@ -133,10 +158,52 @@ function renderType(type, t) {
           {t('6：退款')}
         </Tag>
       );
+    case 20:
+      return (
+        <Tag color='green' shape='circle'>
+          {t('20：容错重试后成功')}
+        </Tag>
+      );
+    case 21:
+      return (
+        <Tag color='lime' shape='circle'>
+          {t('21：容错重试成功')}
+        </Tag>
+      );
+    case 29:
+      return (
+        <Tag color='cyan' shape='circle'>
+          {t('29：容错探测成功')}
+        </Tag>
+      );
+    case 50:
+      return (
+        <Tag color='red' shape='circle'>
+          {t('50：容错重试后失败')}
+        </Tag>
+      );
+    case 51:
+      return (
+        <Tag color='yellow' shape='circle'>
+          {t('51：容错重试已拦截')}
+        </Tag>
+      );
+    case 52:
+      return (
+        <Tag color='red' shape='circle'>
+          {t('52：容错重试客户端可见')}
+        </Tag>
+      );
+    case 59:
+      return (
+        <Tag color='red' shape='circle'>
+          {t('59：容错探测失败')}
+        </Tag>
+      );
     default:
       return (
         <Tag color='grey' shape='circle'>
-          {t('未知') + `(${type})`}
+          {t('未知') + `(${displayType})`}
         </Tag>
       );
   }
@@ -692,7 +759,7 @@ export const getLogsColumns = ({
       title: t('类型'),
       dataIndex: 'type',
       render: (text, record, index) => {
-        return <>{renderType(text, t)}</>;
+        return <>{renderType(text, t, record)}</>;
       },
     },
     {
