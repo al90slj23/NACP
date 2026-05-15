@@ -138,3 +138,76 @@ func TestGroupedLogsChannelFilterKeepsFullRetryTrace(t *testing.T) {
 	require.Equal(t, 152, items[0].Quota)
 	require.Equal(t, "nacp_t_filter", items[0].Username)
 }
+
+func TestGroupedLogsDoesNotCreateFailedSummaryWithoutTerminal52(t *testing.T) {
+	cleanLogs(t)
+	require.NoError(t, model.LOG_DB.Exec("DELETE FROM logs").Error)
+
+	const requestId = "grouped_retry_incomplete_51_only"
+	insertGroupedLogTestRow(t, model.Log{
+		RequestId: requestId,
+		Type:      model.LogTypeErrorIntercepted,
+		CreatedAt: 400,
+		ChannelId: 12,
+		Content:   "intercepted but not terminal",
+		Other:     `{"admin_info":{"status_code":500}}`,
+	})
+	insertGroupedLogTestRow(t, model.Log{
+		RequestId: requestId,
+		Type:      model.LogTypeErrorIntercepted,
+		CreatedAt: 401,
+		ChannelId: 12,
+		Content:   "second intercepted but not terminal",
+		Other:     `{"admin_info":{"status_code":499}}`,
+	})
+
+	items, total, err := GetGroupedLogs(GroupedLogParams{Page: 1, PageSize: 20})
+	require.NoError(t, err)
+	require.EqualValues(t, 0, total)
+	require.Len(t, items, 0)
+}
+
+func TestGroupedLogsCreatesFailedSummaryOnlyWithTerminal52(t *testing.T) {
+	cleanLogs(t)
+	require.NoError(t, model.LOG_DB.Exec("DELETE FROM logs").Error)
+
+	const requestId = "grouped_retry_terminal_52"
+	insertGroupedLogTestRow(t, model.Log{
+		RequestId: requestId,
+		Type:      model.LogTypeErrorIntercepted,
+		CreatedAt: 500,
+		ChannelId: 12,
+		Content:   "intercepted",
+		Other:     `{"admin_info":{"status_code":500}}`,
+	})
+	insertGroupedLogTestRow(t, model.Log{
+		RequestId: requestId,
+		Type:      model.LogTypeProbeFailed,
+		CreatedAt: 501,
+		ChannelId: 13,
+		Content:   "probe failed",
+		Other:     `{"admin_info":{"status_code":503}}`,
+	})
+	insertGroupedLogTestRow(t, model.Log{
+		RequestId: requestId,
+		Type:      model.LogTypeErrorClientVisible,
+		CreatedAt: 502,
+		ChannelId: 14,
+		Username:  "nacp_t_failed",
+		TokenName: "failed-token",
+		ModelName: "claude-haiku",
+		Group:     "default",
+		Content:   "client visible terminal error",
+		Other:     `{"admin_info":{"status_code":503}}`,
+	})
+
+	items, total, err := GetGroupedLogs(GroupedLogParams{Page: 1, PageSize: 20})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, total)
+	require.Len(t, items, 1)
+	require.True(t, items[0].IsSummary)
+	require.Equal(t, 50, items[0].Type)
+	require.Equal(t, requestId, items[0].RequestId)
+	require.Equal(t, "12→14", items[0].ChannelPath)
+	require.Equal(t, "nacp_t_failed", items[0].Username)
+}

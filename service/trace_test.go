@@ -60,10 +60,10 @@ func TestTraceProperty1_DetailFilterAndSort(t *testing.T) {
 		}
 
 		// (a) Only valid types
-		validTypes := map[int]bool{2: true, 5: true, 51: true, 52: true}
+		validTypes := map[int]bool{2: true, 5: true, 51: true, 52: true, 29: true, 59: true}
 		for _, step := range detail.Steps {
 			if !validTypes[step.Type] {
-				t.Fatalf("step has invalid type %d, expected one of {2, 5, 51, 52}", step.Type)
+				t.Fatalf("step has invalid type %d, expected one of {2, 5, 51, 52, 29, 59}", step.Type)
 			}
 		}
 
@@ -82,6 +82,37 @@ func TestTraceProperty1_DetailFilterAndSort(t *testing.T) {
 	})
 }
 
+func TestTraceDetailIncludesProbeLogs(t *testing.T) {
+	cleanLogs(t)
+	requireNoError := func(err error) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	const requestId = "trace_detail_probe_logs"
+	rows := []model.Log{
+		{RequestId: requestId, Type: model.LogTypeErrorIntercepted, CreatedAt: 100, ChannelId: 12},
+		{RequestId: requestId, Type: model.LogTypeProbeSuccess, CreatedAt: 101, ChannelId: 13},
+		{RequestId: requestId, Type: model.LogTypeProbeFailed, CreatedAt: 102, ChannelId: 14},
+		{RequestId: requestId, Type: model.LogTypeErrorClientVisible, CreatedAt: 103, ChannelId: 12},
+	}
+	for _, row := range rows {
+		requireNoError(model.LOG_DB.Create(&row).Error)
+	}
+
+	detail, err := GetTraceDetail(requestId)
+	requireNoError(err)
+	if len(detail.Steps) != len(rows) {
+		t.Fatalf("expected %d steps, got %d", len(rows), len(detail.Steps))
+	}
+	expectedTypes := []int{model.LogTypeErrorIntercepted, model.LogTypeProbeSuccess, model.LogTypeProbeFailed, model.LogTypeErrorClientVisible}
+	for i, expectedType := range expectedTypes {
+		if detail.Steps[i].Type != expectedType {
+			t.Fatalf("step[%d] type: expected %d, got %d", i, expectedType, detail.Steps[i].Type)
+		}
+	}
+}
 
 // Feature: request-trace-view, Property 2: Other 字段 status_code 解析
 // For any Log record, if Other is valid JSON with admin_info.status_code numeric field,
@@ -300,7 +331,6 @@ func TestTraceProperty5_SummaryAggregation(t *testing.T) {
 	})
 }
 
-
 // Feature: request-trace-view, Property 6: HAVING 过滤条件
 // For any trace list query result, every returned record's request_id should satisfy:
 // log_count >= 2 OR has_error (type ∈ {5, 51, 52})
@@ -447,7 +477,7 @@ func TestTraceProperty8_QuotaTokenAggregation(t *testing.T) {
 		requestId := fmt.Sprintf("req_%s", rapid.StringMatching(`[a-z0-9]{8,16}`).Draw(t, "requestId"))
 
 		// Generate a mix of logs, some type=2 with quota/tokens
-		validTypes := []int{2, 5, 51, 52}
+		validTypes := []int{2, 5, 51, 52, 29, 59}
 		numLogs := rapid.IntRange(2, 15).Draw(t, "numLogs")
 
 		var baseTime int64 = 1700000000

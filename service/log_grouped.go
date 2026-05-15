@@ -233,7 +233,7 @@ func getLogsForRequestId(params GroupedLogParams) ([]GroupedLogItem, int64, erro
 	if err != nil {
 		return nil, 0, err
 	}
-	if retryCount > 0 {
+	if retryCount > 0 && hasTraceTerminalLog(params.RequestId) {
 		return getSummaryLogsForRequestId(params)
 	}
 	return getFlatLogsForRequestId(params)
@@ -333,6 +333,7 @@ func getSummaryLogsWithType(params GroupedLogParams) ([]GroupedLogItem, int64, e
 	if err := subQuery.Pluck("request_id", &targetReqIds).Error; err != nil {
 		return nil, 0, err
 	}
+	targetReqIds = filterTerminalTraceRequestIds(targetReqIds)
 	targetReqIds = filterTraceRequestIdsByCommonFilters(params, targetReqIds)
 
 	if len(targetReqIds) == 0 {
@@ -388,7 +389,33 @@ func getRetryRequestIds(params GroupedLogParams) []string {
 
 	var retryReqIds []string
 	tx.Pluck("request_id", &retryReqIds)
+	retryReqIds = filterTerminalTraceRequestIds(retryReqIds)
 	return filterTraceRequestIdsByCommonFilters(params, retryReqIds)
+}
+
+func hasTraceTerminalLog(requestId string) bool {
+	if requestId == "" {
+		return false
+	}
+	var count int64
+	err := model.LOG_DB.Model(&model.Log{}).
+		Where("request_id = ?", requestId).
+		Where("type IN (2, 52)").
+		Count(&count).Error
+	return err == nil && count > 0
+}
+
+func filterTerminalTraceRequestIds(reqIds []string) []string {
+	if len(reqIds) == 0 {
+		return reqIds
+	}
+	var terminalReqIds []string
+	model.LOG_DB.Table("logs").
+		Select("DISTINCT request_id").
+		Where("request_id IN ?", reqIds).
+		Where("type IN (2, 52)").
+		Pluck("request_id", &terminalReqIds)
+	return terminalReqIds
 }
 
 func filterTraceRequestIdsByCommonFilters(params GroupedLogParams, reqIds []string) []string {

@@ -178,7 +178,7 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, excludeIDs
 	}
 
 	// NACP: Fallback — if all channels filtered out, retry with unfiltered list
-	if len(targetChannels) == 0 {
+	if len(targetChannels) == 0 && excluded == nil {
 		// Try without health/exclusion filter as safety net
 		for _, channelId := range channels {
 			if channel, ok := channelsIDM[channelId]; ok {
