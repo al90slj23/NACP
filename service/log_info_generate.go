@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/base64"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -31,6 +32,39 @@ func appendRequestPath(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, other
 		}
 		other["request_path"] = path
 	}
+}
+
+func appendRelayTimingInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, other map[string]interface{}) {
+	if other == nil {
+		return
+	}
+	timing := map[string]interface{}{}
+	downstreamReceivedAt := common.GetContextKeyTime(ctx, constant.ContextKeyRelayReceivedAt)
+	if downstreamReceivedAt.IsZero() {
+		downstreamReceivedAt = common.GetContextKeyTime(ctx, constant.ContextKeyRequestStartTime)
+	}
+	if downstreamReceivedAt.IsZero() && relayInfo != nil && !relayInfo.StartTime.IsZero() {
+		downstreamReceivedAt = relayInfo.StartTime
+	}
+	if !downstreamReceivedAt.IsZero() {
+		timing["downstream_received_at_ms"] = downstreamReceivedAt.UnixMilli()
+	}
+	upstreamStartedAt := common.GetContextKeyTime(ctx, constant.ContextKeyUpstreamStartedAt)
+	if upstreamStartedAt.IsZero() && relayInfo != nil && !relayInfo.StartTime.IsZero() {
+		upstreamStartedAt = relayInfo.StartTime
+	}
+	if !upstreamStartedAt.IsZero() {
+		timing["upstream_started_at_ms"] = upstreamStartedAt.UnixMilli()
+	}
+	upstreamFinishedAt := common.GetContextKeyTime(ctx, constant.ContextKeyUpstreamFinishedAt)
+	if upstreamFinishedAt.IsZero() {
+		upstreamFinishedAt = time.Now()
+	}
+	if !upstreamFinishedAt.IsZero() {
+		timing["upstream_finished_at_ms"] = upstreamFinishedAt.UnixMilli()
+	}
+	timing["downstream_finished_at_ms"] = time.Now().UnixMilli()
+	other["timing"] = timing
 }
 
 func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, modelRatio, groupRatio, completionRatio float64,
@@ -79,6 +113,7 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	appendBillingInfo(relayInfo, other)
 	appendParamOverrideInfo(relayInfo, other)
 	appendStreamStatus(relayInfo, other)
+	appendRelayTimingInfo(ctx, relayInfo, other)
 	return other
 }
 

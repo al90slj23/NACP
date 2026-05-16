@@ -161,3 +161,45 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 	}
 	return channel, selectGroup, nil
 }
+
+// CacheGetNextSatisfiedChannel selects the next not-yet-tried channel for a
+// sequential failover chain. It exhausts the current group by priority before
+// returning nil, instead of relying on RetryTimes as a hard channel count.
+func CacheGetNextSatisfiedChannel(param *RetryParam) (*model.Channel, string, error) {
+	selectGroup := param.TokenGroup
+	userGroup := common.GetContextKeyString(param.Ctx, constant.ContextKeyUserGroup)
+
+	if param.TokenGroup == "auto" {
+		if len(setting.GetAutoGroups()) == 0 {
+			return nil, selectGroup, errors.New("auto groups is not enabled")
+		}
+		autoGroups := GetUserAutoGroup(userGroup)
+		startGroupIndex := 0
+		if lastGroupIndex, exists := common.GetContextKey(param.Ctx, constant.ContextKeyAutoGroupIndex); exists {
+			if idx, ok := lastGroupIndex.(int); ok {
+				startGroupIndex = idx
+			}
+		}
+		for i := startGroupIndex; i < len(autoGroups); i++ {
+			autoGroup := autoGroups[i]
+			channel, err := model.GetNextSatisfiedChannel(autoGroup, param.ModelName, param.ExcludeIDs)
+			if err != nil {
+				return nil, autoGroup, err
+			}
+			if channel == nil {
+				common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupIndex, i+1)
+				continue
+			}
+			common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroup, autoGroup)
+			common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupIndex, i)
+			return channel, autoGroup, nil
+		}
+		return nil, selectGroup, nil
+	}
+
+	channel, err := model.GetNextSatisfiedChannel(param.TokenGroup, param.ModelName, param.ExcludeIDs)
+	if err != nil {
+		return nil, param.TokenGroup, err
+	}
+	return channel, selectGroup, nil
+}

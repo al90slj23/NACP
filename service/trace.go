@@ -16,6 +16,7 @@ type TraceListParams struct {
 	EndTimestamp   int64
 	ModelName      string
 	Username       string
+	TokenName      string
 	Status         string // "success" or "failed"
 }
 
@@ -103,18 +104,18 @@ func GetTraceList(params TraceListParams) ([]TraceSummary, int64, error) {
 		MAX(CASE WHEN username <> '' THEN username ELSE '' END) AS username,
 		MAX(CASE WHEN token_name <> '' THEN token_name ELSE '' END) AS token_name,
 		COUNT(DISTINCT channel_id) AS channel_count,
-		MAX(CASE WHEN type = 2 THEN 1 ELSE 0 END) AS has_success,
-		SUM(CASE WHEN type = 2 THEN quota ELSE 0 END) AS total_quota,
-		SUM(CASE WHEN type = 2 THEN prompt_tokens ELSE 0 END) AS total_prompt_tokens,
-		SUM(CASE WHEN type = 2 THEN completion_tokens ELSE 0 END) AS total_completion_tokens,
+		MAX(CASE WHEN type IN (2, 20, 21) THEN 1 ELSE 0 END) AS has_success,
+		SUM(CASE WHEN type IN (2, 20) THEN quota ELSE 0 END) AS total_quota,
+		SUM(CASE WHEN type IN (2, 20) THEN prompt_tokens ELSE 0 END) AS total_prompt_tokens,
+		SUM(CASE WHEN type IN (2, 20) THEN completion_tokens ELSE 0 END) AS total_completion_tokens,
 		COUNT(*) AS log_count,
-		MAX(CASE WHEN type IN (5, 51, 52) THEN 1 ELSE 0 END) AS has_error
+		MAX(CASE WHEN type IN (5, 50, 51, 52, 59) THEN 1 ELSE 0 END) AS has_error
 	`
 
 	// Build WHERE conditions
 	tx := model.LOG_DB.Table("logs").
 		Select(selectSQL).
-		Where("(type IN (2, 5, 51, 52) OR (type = 4 AND trace_role = ?))", model.TraceRoleProbeSuccess).
+		Where("(type IN (2, 5, 20, 21, 29, 50, 51, 52, 59) OR (type = 4 AND trace_role = ?))", model.TraceRoleProbeSuccess).
 		Where("request_id != ''")
 
 	if params.StartTimestamp != 0 {
@@ -128,6 +129,9 @@ func GetTraceList(params TraceListParams) ([]TraceSummary, int64, error) {
 	}
 	if params.Username != "" {
 		tx = tx.Where("username = ?", params.Username)
+	}
+	if params.TokenName != "" {
+		tx = tx.Where("token_name = ?", params.TokenName)
 	}
 
 	tx = tx.Group("request_id").
@@ -219,8 +223,8 @@ func GetTraceDetail(requestId string) (*TraceDetail, error) {
 	err := model.LOG_DB.Table("logs").
 		Select("id, channel_id, type, use_time, model_name, quota, created_at, other, username, token_name, prompt_tokens, completion_tokens, "+logGroupCol()+" AS group_val, ip, is_stream, content, trace_id, trace_seq, trace_parent_id, trace_sibling_seq, trace_role").
 		Where("request_id = ?", requestId).
-		Where("(type IN (2, 5, 51, 52, 29, 59) OR (type = 4 AND trace_role = ?))", model.TraceRoleProbeSuccess).
-		Order("CASE WHEN trace_seq > 0 THEN trace_seq ELSE 2147483647 END ASC, created_at ASC, id ASC").
+		Where("(type IN (2, 5, 21, 29, 51, 52, 59) OR (type = 4 AND trace_role = ?))", model.TraceRoleProbeSuccess).
+		Order("CASE WHEN trace_seq > 0 THEN trace_seq ELSE 2147483647 END ASC, trace_sibling_seq ASC, id ASC").
 		Limit(100).
 		Find(&rows).Error
 	if err != nil {
@@ -282,8 +286,9 @@ func GetTraceDetail(requestId string) (*TraceDetail, error) {
 			minCreatedAt = row.CreatedAt
 		}
 
-		// Aggregate quota/tokens from type=2 (Consume) logs only
-		if row.Type == model.LogTypeConsume {
+		// Aggregate quota/tokens from consume event logs only. Summary rows are
+		// excluded from trace details to avoid duplicate totals.
+		if row.Type == model.LogTypeConsume || row.Type == model.LogTypeRetryConsume {
 			totalQuota += row.Quota
 			totalPromptTokens += row.PromptTokens
 			totalCompletionTokens += row.CompletionTokens

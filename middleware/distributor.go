@@ -132,11 +132,12 @@ func Distribute() func(c *gin.Context) {
 				}
 
 				if channel == nil {
-					channel, selectGroup, err = service.CacheGetRandomSatisfiedChannel(&service.RetryParam{
+					// NACP: SFT uses the same deterministic order for the first
+					// formal attempt and all later failover attempts.
+					channel, selectGroup, err = service.CacheGetNextSatisfiedChannel(&service.RetryParam{
 						Ctx:        c,
 						ModelName:  modelRequest.Model,
 						TokenGroup: usingGroup,
-						Retry:      common.GetPointer(0),
 					})
 					if err != nil {
 						showGroup := usingGroup

@@ -32,6 +32,7 @@ func GetTraceList(c *gin.Context) {
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	modelName := c.Query("model_name")
 	username := c.Query("username")
+	tokenName := c.Query("token_name")
 	status := c.Query("status")
 
 	// Validate status parameter if provided
@@ -50,6 +51,7 @@ func GetTraceList(c *gin.Context) {
 		EndTimestamp:   endTimestamp,
 		ModelName:      modelName,
 		Username:       username,
+		TokenName:      tokenName,
 		Status:         status,
 	}
 

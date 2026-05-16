@@ -56,6 +56,22 @@ const colors = [
   'yellow',
 ];
 
+const lightweightProbeTagStyle = {
+  success: {
+    backgroundColor: 'rgba(var(--semi-teal-5), 0.14)',
+    border: '1px solid rgba(var(--semi-teal-5), 0.22)',
+    color: 'rgba(var(--semi-teal-8), 0.92)',
+  },
+  failed: {
+    backgroundColor: 'rgba(var(--semi-red-5), 0.10)',
+    border: '1px solid rgba(var(--semi-red-5), 0.18)',
+    color: 'rgba(var(--semi-red-8), 0.86)',
+  },
+};
+
+const LOG_METRIC_TYPES = new Set([0, 2, 5, 6, 20, 21, 29, 50, 51, 52, 59]);
+const RELAY_DISPLAY_TYPES = new Set([2, 5, 20, 21, 29, 50, 51, 52, 59]);
+
 function formatRatio(ratio) {
   if (ratio === undefined || ratio === null) {
     return '-';
@@ -172,7 +188,11 @@ function renderType(type, t, record = {}) {
       );
     case 29:
       return (
-        <Tag color='cyan' shape='circle'>
+        <Tag
+          color='white'
+          shape='circle'
+          style={lightweightProbeTagStyle.success}
+        >
           {t('29：容错探测成功')}
         </Tag>
       );
@@ -196,7 +216,11 @@ function renderType(type, t, record = {}) {
       );
     case 59:
       return (
-        <Tag color='red' shape='circle'>
+        <Tag
+          color='white'
+          shape='circle'
+          style={lightweightProbeTagStyle.failed}
+        >
           {t('59：容错探测失败')}
         </Tag>
       );
@@ -318,11 +342,88 @@ function renderFirstUseTime(type, t) {
 }
 
 function isLogMetricType(type) {
-  return [0, 2, 5, 6].includes(type);
+  return LOG_METRIC_TYPES.has(Number(type));
 }
 
 function isRelayLogType(type) {
-  return [2, 5].includes(type);
+  return RELAY_DISPLAY_TYPES.has(Number(type));
+}
+
+function getRecordChannelPath(record) {
+  const other = getLogOther(record.other);
+  const rawPath =
+    record.channel_path ||
+    other?.summary?.channel_path ||
+    other?.admin_info?.use_channel;
+  if (Array.isArray(rawPath)) {
+    return rawPath
+      .map((id) => String(id || '').trim())
+      .filter((id) => id !== '' && id !== '0');
+  }
+  if (typeof rawPath === 'string') {
+    return rawPath
+      .split(/->|→|,/)
+      .map((id) => id.trim())
+      .filter((id) => id !== '' && id !== '0');
+  }
+  if (record.channel) {
+    return [String(record.channel)];
+  }
+  return [];
+}
+
+function getCompactChannelPath(ids) {
+  const path = Array.isArray(ids) ? ids.filter(Boolean) : [];
+  if (path.length <= 2) {
+    return path;
+  }
+  return [path[0], '...', path[path.length - 1]];
+}
+
+function renderChannelPath(ids, t) {
+  const path = Array.isArray(ids) ? ids.filter(Boolean) : [];
+  if (path.length === 0) {
+    return <span>-</span>;
+  }
+  const compactPath = getCompactChannelPath(path);
+  const fullPathText = path.join(' → ');
+  const content = (
+    <div style={{ lineHeight: 1.6 }}>
+      <div>{`${t('完整渠道链路')}：${fullPathText}`}</div>
+      <div style={{ color: 'var(--semi-color-text-2)' }}>
+        {`${t('渠道数量')}：${path.length}`}
+      </div>
+    </div>
+  );
+
+  return (
+    <Popover content={content} position='top' trigger='hover' showArrow>
+      <span
+        title={`${t('完整渠道链路')}：${fullPathText}`}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          maxWidth: '100%',
+          cursor: path.length > 1 ? 'help' : 'default',
+        }}
+      >
+        {compactPath.map((id, i) => (
+          <React.Fragment key={`${id}-${i}`}>
+            {i > 0 && <span style={{ color: '#999' }}>→</span>}
+            {id === '...' ? (
+              <span style={{ color: '#999', fontWeight: 600, margin: '0 4px' }}>
+                ...
+              </span>
+            ) : (
+              <Tag color={colors[parseInt(id) % colors.length]} shape='circle'>
+                {id}
+              </Tag>
+            )}
+          </React.Fragment>
+        ))}
+      </span>
+    </Popover>
+  );
 }
 
 function renderBillingTag(record, t) {
@@ -567,26 +668,9 @@ export const getLogsColumns = ({
       dataIndex: 'channel',
       render: (text, record, index) => {
         // Summary row: render channel_path as colored Tags joined by "→"
-        if (record.is_summary && record.channel_path) {
-          const ids = record.channel_path.split('→');
-          return (
-            <Space>
-              {ids.map((id, i) => (
-                <React.Fragment key={i}>
-                  {i > 0 && <span style={{ color: '#999' }}>→</span>}
-                  <Tag
-                    color={colors[parseInt(id) % colors.length]}
-                    shape='circle'
-                  >
-                    {id}
-                  </Tag>
-                </React.Fragment>
-              ))}
-            </Space>
-          );
-        }
         if (record.is_summary) {
-          return <span>-</span>;
+          const ids = getRecordChannelPath(record);
+          return renderChannelPath(ids, t);
         }
 
         let isMultiKey = false;
@@ -867,8 +951,8 @@ export const getLogsColumns = ({
       title: t('输出'),
       dataIndex: 'completion_tokens',
       render: (text, record, index) => {
-        return parseInt(text) > 0 && isLogMetricType(record.type) ? (
-          <>{<span> {text} </span>}</>
+        return isLogMetricType(record.type) ? (
+          <>{<span> {text ?? 0} </span>}</>
         ) : (
           <></>
         );
@@ -938,9 +1022,10 @@ export const getLogsColumns = ({
       title: t('重试'),
       dataIndex: 'retry',
       render: (text, record, index) => {
-        if (record.is_summary && record.channel_path) {
+        if (record.is_summary) {
+          const ids = getRecordChannelPath(record);
           return isAdminUser ? (
-            <div>{t('渠道') + `：${record.channel_path}`}</div>
+            <div>{ids.length > 0 ? t('渠道') + `：${ids.join('->')}` : ''}</div>
           ) : (
             <></>
           );

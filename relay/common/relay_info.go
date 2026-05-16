@@ -434,7 +434,10 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 		tokenGroup = common.GetContextKeyString(c, constant.ContextKeyUserGroup)
 	}
 
-	startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
+	startTime := common.GetContextKeyTime(c, constant.ContextKeyRelayReceivedAt)
+	if startTime.IsZero() {
+		startTime = common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
+	}
 	if startTime.IsZero() {
 		startTime = time.Now()
 	}

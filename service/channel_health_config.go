@@ -41,6 +41,11 @@ type ChannelHealthConfig struct {
 
 	// LowChannelWarningThreshold: emit warning when healthy channels <= this count
 	LowChannelWarningThreshold int // default: 2
+
+	// TotalRetryTimeout: max wall-clock time for SFT retry orchestration after
+	// NACP receives the relay request. It limits additional retry/probe waits;
+	// an already-running upstream request is not interrupted by this guard.
+	TotalRetryTimeout time.Duration // default: 30 seconds
 }
 
 // DefaultHealthConfig returns the default configuration with sensible defaults.
@@ -56,6 +61,7 @@ func DefaultHealthConfig() *ChannelHealthConfig {
 		MaxRetrySamePriority:       3,
 		PreWarmChannelCount:        2,
 		LowChannelWarningThreshold: 2,
+		TotalRetryTimeout:          30 * time.Second,
 	}
 }
 

@@ -18,6 +18,13 @@ DEPLOY_DIR="/opt/nacp"
 COMPOSE_FILE="docker-compose.yml"
 CONTAINER_NAME="nacp"
 
+# ─── 本地开发固定端口 ─────────────────────────────────────────────────────────
+LOCAL_BACKEND_PORT="${NACP_LOCAL_BACKEND_PORT:-23900}"
+LOCAL_FRONTEND_PORT="${NACP_LOCAL_FRONTEND_PORT:-23901}"
+LOCAL_FRONTEND_HOST="${NACP_LOCAL_FRONTEND_HOST:-127.0.0.1}"
+ONLINE_DB_HOST="${NACP_ONLINE_DB_HOST:-${DEPLOY_SERVER}}"
+ONLINE_DB_PORT="${NACP_ONLINE_DB_PORT:-3306}"
+
 # ─── 颜色 ─────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -32,7 +39,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step()  { echo -e "${CYAN}[STEP]${NC} $1"; }
 
 # ─── SSH 辅助 ─────────────────────────────────────────────────────────────────
-SSH_KEY="~/.ssh/al90slj23"
+SSH_KEY="${HOME}/.ssh/al90slj23"
 
 remote_exec() {
     ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${DEPLOY_USER}@${DEPLOY_SERVER}" "$@"
@@ -63,46 +70,217 @@ ensure_web_dist() {
     if [ ! -d "web/dist" ]; then
         log_info "web/dist 不存在，创建占位目录（开发模式使用 Vite dev server）..."
         mkdir -p web/dist
-        echo "<html><body>Use Vite dev server at :5173</body></html>" > web/dist/index.html
+        echo "<html><body>Use Vite dev server at :${LOCAL_FRONTEND_PORT}</body></html>" > web/dist/index.html
         log_info "占位目录已创建"
     fi
 }
 
-ensure_local_mysql() {
-    # Check if local dev MySQL is running
-    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "nacp-mysql-dev"; then
-        # Check if Docker daemon is running, start if not (macOS)
-        if ! docker info >/dev/null 2>&1; then
-            log_info "Docker 未运行，正在启动 Docker Desktop..."
-            open -a Docker
-            # Wait for Docker to be ready
-            local retries=30
-            while ! docker info >/dev/null 2>&1; do
-                retries=$((retries - 1))
-                if [ $retries -le 0 ]; then
-                    log_error "Docker Desktop 启动超时，请手动启动后重试"
-                    exit 1
-                fi
-                sleep 2
-            done
-            log_info "Docker Desktop 已就绪"
-        fi
-        log_info "本地 MySQL 未运行，正在启动..."
-        docker compose -f docker-compose.dev.yml up -d
-        log_info "等待 MySQL 就绪..."
-        sleep 5
+ensure_docker_ready() {
+    if docker info >/dev/null 2>&1; then
+        return 0
     fi
+    if ! command -v docker >/dev/null 2>&1; then
+        log_error "未找到 docker CLI，请先安装 Docker Desktop"
+        exit 1
+    fi
+    log_info "Docker 未运行，正在启动 Docker Desktop..."
+    if ! start_docker_desktop; then
+        log_error "无法自动启动 Docker Desktop，请手动启动 Docker 后重试"
+        exit 1
+    fi
+    local retries=60
+    while ! docker info >/dev/null 2>&1; do
+        retries=$((retries - 1))
+        if [ $retries -le 0 ]; then
+            log_error "Docker Desktop 启动超时，请手动启动后重试"
+            exit 1
+        fi
+        sleep 2
+    done
+    log_info "Docker Desktop 已就绪"
+}
+
+start_docker_desktop() {
+    if ! command -v open >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local app
+    for app in \
+        "/Applications/Docker.app" \
+        "${HOME}/Applications/Docker.app" \
+        "/Applications/Docker Desktop.app" \
+        "${HOME}/Applications/Docker Desktop.app"; do
+        if [ -d "$app" ] && open -gj "$app" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+
+    if open -b com.docker.docker >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if command -v mdfind >/dev/null 2>&1; then
+        app=$(mdfind "kMDItemCFBundleIdentifier == 'com.docker.docker'" 2>/dev/null | head -n 1)
+        if [ -n "$app" ] && [ -d "$app" ] && open -gj "$app" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
+    open -a Docker >/dev/null 2>&1 || open -a "Docker Desktop" >/dev/null 2>&1
+}
+
+port_pids() {
+    local port=$1
+    lsof -nP -tiTCP:${port} -sTCP:LISTEN 2>/dev/null
 }
 
 # 清理占用端口的进程
 kill_port() {
     local port=$1
-    local pid=$(lsof -ti :${port} 2>/dev/null)
-    if [ -n "$pid" ]; then
-        log_warn "端口 ${port} 被占用 (PID: ${pid})，正在清理..."
-        kill -9 $pid 2>/dev/null
+    local pids=$(port_pids "${port}")
+    if [ -n "$pids" ]; then
+        log_warn "端口 ${port} 被占用 (PID: ${pids//$'\n'/, })，正在清理..."
+        kill -9 $pids 2>/dev/null
         sleep 1
     fi
+}
+
+wait_backend_ready() {
+    local url="http://localhost:${LOCAL_BACKEND_PORT}/api/status"
+    local retries="${1:-90}"
+    local waited=0
+
+    log_info "等待后端就绪: ${url}"
+    while [ "$waited" -lt "$retries" ]; do
+        if curl -fsS "$url" >/dev/null 2>&1; then
+            log_info "后端已就绪"
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+        if [ $((waited % 10)) -eq 0 ]; then
+            log_info "后端仍在启动中（${waited}s）..."
+        fi
+    done
+
+    log_error "后端 ${retries}s 内未就绪，请查看上方 Go 启动日志"
+    return 1
+}
+
+wait_frontend_ready() {
+    local url="http://localhost:${LOCAL_FRONTEND_PORT}/"
+    local retries="${1:-45}"
+    local waited=0
+
+    log_info "等待前端就绪: ${url}"
+    while [ "$waited" -lt "$retries" ]; do
+        if curl -fsS "$url" >/dev/null 2>&1; then
+            log_info "前端已就绪"
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+        if [ $((waited % 10)) -eq 0 ]; then
+            log_info "前端仍在启动中（${waited}s）..."
+        fi
+    done
+
+    log_error "前端 ${retries}s 内未就绪，请检查 Vite 启动日志"
+    return 1
+}
+
+export_local_dev_env() {
+    # 本地开发直接使用 nacp.m.srl 测试站数据库；数据库结构变更也在测试站库上验证。
+    export_online_test_db_env
+    export PORT="$LOCAL_BACKEND_PORT"
+    export VITE_BACKEND_PORT="$LOCAL_BACKEND_PORT"
+    export VITE_FRONTEND_PORT="$LOCAL_FRONTEND_PORT"
+    export SESSION_SECRET="${SESSION_SECRET:-local_dev_secret}"
+    export MEMORY_CACHE_ENABLED="${MEMORY_CACHE_ENABLED:-true}"
+    export ERROR_LOG_ENABLED="${ERROR_LOG_ENABLED:-true}"
+    export SKIP_DB_MIGRATION="${NACP_LOCAL_SKIP_DB_MIGRATION:-true}"
+}
+
+remote_env_value() {
+    local key="$1"
+    remote_exec "cd ${DEPLOY_DIR} && grep -E '^${key}=' .env 2>/dev/null | tail -n 1 | cut -d= -f2-" 2>/dev/null
+}
+
+local_env_value() {
+    local key="$1"
+    [ -f .env ] || return 0
+    grep -E "^${key}=" .env 2>/dev/null | tail -n 1 | cut -d= -f2-
+}
+
+strip_env_quotes() {
+    local value="$1"
+    value="${value%\"}"
+    value="${value#\"}"
+    value="${value%\'}"
+    value="${value#\'}"
+    printf '%s' "$value"
+}
+
+rewrite_dsn_host() {
+    local dsn="$1"
+    printf '%s' "$dsn" | sed -E "s#@tcp\\([^)]*\\)#@tcp(${ONLINE_DB_HOST}:${ONLINE_DB_PORT})#"
+}
+
+mask_dsn() {
+    printf '%s' "$1" | sed -E 's#(//?)[^/@]+@#\1***@#; s#(^[^:]+:)[^@]+@#\1***@#'
+}
+
+export_online_test_db_env() {
+    local remote_sql_dsn remote_log_sql_dsn
+    remote_sql_dsn="$(strip_env_quotes "$(local_env_value SQL_DSN)")"
+    if [ -z "$remote_sql_dsn" ]; then
+        remote_sql_dsn="$(strip_env_quotes "$(remote_env_value SQL_DSN)")"
+    fi
+    if [ -z "$remote_sql_dsn" ]; then
+        log_error "无法从本地 .env 或 ${DEPLOY_SERVER}:${DEPLOY_DIR}/.env 读取 SQL_DSN"
+        exit 1
+    fi
+    export SQL_DSN
+    SQL_DSN="$(rewrite_dsn_host "$remote_sql_dsn")"
+
+    remote_log_sql_dsn="$(strip_env_quotes "$(local_env_value LOG_SQL_DSN)")"
+    if [ -z "$remote_log_sql_dsn" ]; then
+        remote_log_sql_dsn="$(strip_env_quotes "$(remote_env_value LOG_SQL_DSN)")"
+    fi
+    if [ -n "$remote_log_sql_dsn" ]; then
+        export LOG_SQL_DSN
+        LOG_SQL_DSN="$(rewrite_dsn_host "$remote_log_sql_dsn")"
+    else
+        unset LOG_SQL_DSN
+    fi
+}
+
+load_local_env_defaults() {
+    [ -f .env ] || return 0
+    while IFS='=' read -r key value; do
+        case "$key" in
+            SESSION_SECRET|MEMORY_CACHE_ENABLED|ERROR_LOG_ENABLED|SKIP_DB_MIGRATION|SYNC_FREQUENCY)
+                if [ -n "${!key}" ]; then
+                    continue
+                fi
+                value="${value%\"}"
+                value="${value#\"}"
+                value="${value%\'}"
+                value="${value#\'}"
+                export "$key=$value"
+                ;;
+        esac
+    done < .env
+}
+
+stop_local_dev_processes() {
+    log_info "停止本地开发进程..."
+    pkill -f "go run main.go" 2>/dev/null && log_info "后端 go run 已停止" || log_warn "未发现 go run 后端"
+    pkill -f "bun run dev" 2>/dev/null && log_info "前端 bun dev 已停止" || log_warn "未发现 bun dev 前端"
+    pkill -f "vite.*--port ${LOCAL_FRONTEND_PORT}" 2>/dev/null
+    kill_port "${LOCAL_BACKEND_PORT}"
+    kill_port "${LOCAL_FRONTEND_PORT}"
 }
 
 local_dev() {
@@ -112,93 +290,70 @@ local_dev() {
         echo "  a) 启动后端 (go run)"
         echo "  b) 启动前端 (bun run dev)"
         echo "  c) 同时启动后端+前端 [默认]"
+        echo "  r) 重启后端+前端（使用线上测试数据库）"
         echo "  d) 停止本地开发"
-        echo "  e) 启动本地 MySQL"
-        echo "  f) 停止本地 MySQL"
         read -p "选择 [c]: " sub_choice
         sub_choice="${sub_choice:-c}"
     fi
 
-    # Load .env if exists (for SQL_DSN etc.)
-    if [ -f .env ]; then
-        set -a; source .env; set +a
-    fi
-
-    # Default local dev SQL_DSN (uses local Docker MySQL on port 3307)
-    LOCAL_SQL_DSN="nacp_dev:nacp_dev_pass@tcp(localhost:3307)/nacp_dev?charset=utf8mb4&parseTime=True&loc=Local"
+    # Load non-DB env defaults safely, then force online test DB in export_local_dev_env.
+    load_local_env_defaults
 
     case "$sub_choice" in
         a)
             ensure_web_dist
-            ensure_local_mysql
-            kill_port 3000
-            log_info "启动后端 (端口 3000)..."
-            if [ -z "$SQL_DSN" ]; then
-                export SQL_DSN="$LOCAL_SQL_DSN"
-                log_info "使用本地 MySQL (端口 3307)"
-            else
-                log_info "使用 .env 中的 SQL_DSN"
-            fi
-            export SESSION_SECRET="${SESSION_SECRET:-local_dev_secret}"
-            export MEMORY_CACHE_ENABLED="${MEMORY_CACHE_ENABLED:-true}"
-            export ERROR_LOG_ENABLED="${ERROR_LOG_ENABLED:-true}"
+            kill_port "${LOCAL_BACKEND_PORT}"
+            export_local_dev_env
+            log_info "启动后端 (端口 ${LOCAL_BACKEND_PORT})..."
+            log_info "使用线上测试数据库: $(mask_dsn "$SQL_DSN")"
             log_info "按 Ctrl+C 停止"
             go run main.go
             ;;
         b)
-            kill_port 5173
-            log_info "启动前端开发服务器 (端口 5173, 热更新)..."
+            kill_port "${LOCAL_FRONTEND_PORT}"
+            log_info "启动前端开发服务器 (端口 ${LOCAL_FRONTEND_PORT}, 热更新)..."
             log_info "按 Ctrl+C 停止"
-            (cd web && bun install --frozen-lockfile 2>/dev/null; bun run dev)
+            (cd web && bun install --frozen-lockfile 2>/dev/null; bun run dev -- --host "${LOCAL_FRONTEND_HOST}" --port "${LOCAL_FRONTEND_PORT}")
             ;;
-        c)
+        c|r|restart)
             ensure_web_dist
-            ensure_local_mysql
-            kill_port 3000
-            kill_port 5173
-            if [ -z "$SQL_DSN" ]; then
-                export SQL_DSN="$LOCAL_SQL_DSN"
-                log_info "使用本地 MySQL (端口 3307)"
+            if [ "$sub_choice" = "r" ] || [ "$sub_choice" = "restart" ]; then
+                stop_local_dev_processes
             fi
-            export SESSION_SECRET="${SESSION_SECRET:-local_dev_secret}"
-            export MEMORY_CACHE_ENABLED="${MEMORY_CACHE_ENABLED:-true}"
-            export ERROR_LOG_ENABLED="${ERROR_LOG_ENABLED:-true}"
+            kill_port "${LOCAL_BACKEND_PORT}"
+            kill_port "${LOCAL_FRONTEND_PORT}"
+            export_local_dev_env
             log_info "启动后端+前端（热更新模式）..."
-            log_info "后端: :3000 | 前端: :5173 (浏览器访问 http://localhost:5173)"
+            log_info "后端: :${LOCAL_BACKEND_PORT} | 前端: :${LOCAL_FRONTEND_PORT} | 数据库: ${DEPLOY_SERVER}"
+            log_info "浏览器访问: http://localhost:${LOCAL_FRONTEND_PORT}"
+            log_info "后端 API: http://localhost:${LOCAL_BACKEND_PORT}"
+            log_info "数据库 DSN: $(mask_dsn "$SQL_DSN")"
+            if [ -n "$LOG_SQL_DSN" ]; then
+                log_info "日志数据库 DSN: $(mask_dsn "$LOG_SQL_DSN")"
+            else
+                log_warn "未配置 LOG_SQL_DSN，本地开发将使用业务库作为日志库"
+            fi
             log_info "前端修改即时生效（Vite HMR），后端修改需 Ctrl+C 重启"
             log_info "按 Ctrl+C 停止所有进程"
             echo ""
-            # 安装前端依赖（如有新增）
             (cd web && bun install --frozen-lockfile 2>/dev/null)
-            # 启动后端
+            (cd web && bun run dev -- --host "${LOCAL_FRONTEND_HOST}" --port "${LOCAL_FRONTEND_PORT}") &
+            BUN_PID=$!
             go run main.go &
             GO_PID=$!
-            sleep 2
-            # 启动前端 dev server（热更新，改代码即时生效）
-            (cd web && bun run dev) &
-            BUN_PID=$!
+            if ! wait_frontend_ready 60; then
+                kill "$GO_PID" "$BUN_PID" 2>/dev/null
+                exit 1
+            fi
+            if ! wait_backend_ready 120; then
+                kill "$GO_PID" "$BUN_PID" 2>/dev/null
+                exit 1
+            fi
             trap "kill $GO_PID $BUN_PID 2>/dev/null; exit" INT TERM
             wait
             ;;
         d)
-            log_info "停止本地开发进程..."
-            pkill -f "go run main.go" 2>/dev/null && log_info "后端已停止" || log_warn "后端未运行"
-            pkill -f "bun run dev" 2>/dev/null && log_info "前端已停止" || log_warn "前端未运行"
-            kill_port 3000
-            kill_port 5173
-            ;;
-        e)
-            log_info "启动本地开发 MySQL (端口 3307, 数据存储在 ./data/mysql-dev/)..."
-            docker compose -f docker-compose.dev.yml up -d
-            log_info "等待 MySQL 就绪..."
-            sleep 5
-            docker compose -f docker-compose.dev.yml ps
-            log_info "MySQL 连接信息: nacp_dev:nacp_dev_pass@localhost:3307/nacp_dev"
-            ;;
-        f)
-            log_info "停止本地 MySQL..."
-            docker compose -f docker-compose.dev.yml down
-            log_info "已停止（数据保留在 ./data/mysql-dev/）"
+            stop_local_dev_processes
             ;;
         *)
             log_error "未知选项"
@@ -283,6 +438,7 @@ emergency_deploy() {
     log_warn "紧急部署：本地构建 → push 到 GHCR → 服务器更新"
     log_warn "需要 Docker Desktop 运行中"
     echo ""
+    ensure_docker_ready
 
     log_step "1/4 本地构建 Docker 镜像 (linux/amd64)..."
     docker build --platform linux/amd64 -t "${IMAGE}" .
@@ -320,7 +476,7 @@ main() {
     fi
 
     case "$choice" in
-        0) local_dev ;;
+        0) local_dev "${2:-}" ;;
         1) deploy ;;
         2) server_status ;;
         3) server_logs ;;

@@ -4,6 +4,7 @@
   - 五状态模型：Healthy → Probing → Degraded → Recovering → Healthy
   - 内存优先 + 异步 DB 持久化
   - 独立于现有 Channel.Status 字段（共存策略）
+
 【主要函数】
   - InitChannelHealthStates: 启动时从 DB 加载状态
   - GetChannelHealthStatus: 读取渠道健康状态
@@ -14,6 +15,7 @@
   - ShouldProbeOnError: 判断是否应该触发探测
   - CheckRecoveryTimers: 定时检查恢复观察期
   - StartHealthManagement: 启动入口
+
 【依赖关系】
   - common: 常量、日志、工具函数
   - model: Channel 数据模型、DB 操作
@@ -105,7 +107,6 @@ func InitChannelHealthStates() {
 // Called once at application startup, after InitChannelCache.
 func StartHealthManagement() {
 	InitChannelHealthStates()
-	initProbeHTTPClient()
 
 	if common.IsMasterNode {
 		// Recovery timer checker — every 30 seconds
@@ -116,10 +117,8 @@ func StartHealthManagement() {
 				CheckRecoveryTimers()
 			}
 		})
-		// Degraded probe loop — periodic auxiliary recovery
-		StartDegradedProbeLoop()
 	}
-	common.SysLog("NACP: health management started")
+	common.SysLog("NACP: health management started without lightweight probes")
 }
 
 // ─── Public Read API ──────────────────────────────────────────────────────────

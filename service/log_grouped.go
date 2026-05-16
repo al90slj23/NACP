@@ -45,6 +45,9 @@ type GroupedLogItem struct {
 	TraceParentId    int    `json:"trace_parent_id,omitempty"`
 	TraceSiblingSeq  int    `json:"trace_sibling_seq,omitempty"`
 	TraceRole        string `json:"trace_role,omitempty"`
+	SummaryLogId     int    `json:"summary_log_id,omitempty"`
+	TerminalLogId    int    `json:"terminal_log_id,omitempty"`
+	TraceVersion     int    `json:"trace_version,omitempty"`
 	Group            string `json:"group"`
 	Ip               string `json:"ip"`
 	Other            string `json:"other"`
@@ -97,9 +100,11 @@ func logGroupCol() string {
 	return "`group`"
 }
 
-// GetGroupedLogs keeps the historical endpoint contract but returns flat log
-// rows. Retry/probe structure is represented by trace fields on each row rather
-// than synthetic 20/50 summary rows or persisted 21/51/52/29/59 types.
+// GetGroupedLogs returns the log list used by /console/log.
+// New SFT traces are represented by materialized 20/50 summary rows. Child
+// rows are hidden from the main list and loaded by /api/log/trace. Transitional
+// traces without a materialized summary are still returned as flat rows so the
+// frontend compatibility grouping can keep displaying older in-flight data.
 func GetGroupedLogs(params GroupedLogParams) ([]GroupedLogItem, int64, error) {
 	tx := model.LOG_DB.Model(&model.Log{})
 	if params.LogType != model.LogTypeUnknown {
@@ -111,6 +116,12 @@ func GetGroupedLogs(params GroupedLogParams) ([]GroupedLogItem, int64, error) {
 		tx = tx.Where("NOT (request_id = '' AND trace_role IN ?)", []string{
 			model.TraceRoleProbeSuccess,
 			model.TraceRoleProbeFailed,
+		})
+	}
+	if params.LogType == model.LogTypeUnknown {
+		tx = tx.Where("NOT (summary_log_id > 0 AND type NOT IN ?)", []int{
+			model.LogTypeRetrySuccessSummary,
+			model.LogTypeRetryFailedSummary,
 		})
 	}
 	tx = applyCommonFilters(tx, params)
@@ -157,13 +168,16 @@ func logToGroupedItem(l *model.Log) GroupedLogItem {
 		TraceParentId:    l.TraceParentId,
 		TraceSiblingSeq:  l.TraceSiblingSeq,
 		TraceRole:        l.TraceRole,
+		SummaryLogId:     l.SummaryLogId,
+		TerminalLogId:    l.TerminalLogId,
+		TraceVersion:     l.TraceVersion,
 		Group:            l.Group,
 		Ip:               l.Ip,
 		Other:            l.Other,
 		IsStream:         l.IsStream,
 		Content:          l.Content,
 		SortAt:           l.CreatedAt,
-		IsSummary:        false,
+		IsSummary:        l.Type == model.LogTypeRetrySuccessSummary || l.Type == model.LogTypeRetryFailedSummary,
 	}
 }
 

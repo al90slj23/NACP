@@ -162,7 +162,11 @@ function buildTraceSummaryRow(groupSteps, groupIndex) {
   };
 }
 
-function buildTraceGroupedRows(rawLogs) {
+function buildTraceGroupedRows(rawLogs, enableCompatibilityGrouping = true) {
+  if (!enableCompatibilityGrouping) {
+    return rawLogs || [];
+  }
+
   const groups = new Map();
   for (const log of rawLogs) {
     const key = getTraceGroupKey(log);
@@ -563,8 +567,8 @@ export const useLogsData = () => {
   };
 
   // Format logs data
-  const setLogsFormat = (rawLogs) => {
-    const logs = buildTraceGroupedRows(rawLogs || []);
+  const setLogsFormat = (rawLogs, currentLogType = 0) => {
+    const logs = buildTraceGroupedRows(rawLogs || [], currentLogType === 0);
     const requestConversionDisplayValue = (conversionChain) => {
       const chain = Array.isArray(conversionChain)
         ? conversionChain.filter(Boolean)
@@ -1018,7 +1022,7 @@ export const useLogsData = () => {
       setPageSize(data.page_size);
       setLogCount(data.total);
 
-      setLogsFormat(newPageData);
+      setLogsFormat(newPageData, currentLogType);
     } else {
       showError(message);
     }

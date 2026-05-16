@@ -92,34 +92,81 @@ func executeRelayAttempt(c *gin.Context, relayFormat types.RelayFormat, relayInf
 	return apiErr
 }
 
-func recordSameChannelRetryIntercepted(c *gin.Context, channel *model.Channel, apiErr *types.NewAPIError, retryIndex int) {
-	if channel == nil || apiErr == nil || !constant.ErrorLogEnabled || !types.IsRecordErrorLog(apiErr) {
-		return
+func relayRequestStartTime(c *gin.Context) time.Time {
+	startTime := common.GetContextKeyTime(c, constant.ContextKeyRelayReceivedAt)
+	if startTime.IsZero() {
+		startTime = common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
 	}
-	sameChRetryOther := map[string]interface{}{
-		"retry_type":  "same_channel",
-		"retry_index": retryIndex,
-		"admin_info": map[string]interface{}{
-			"status_code":  apiErr.StatusCode,
-			"error_type":   apiErr.GetErrorType(),
-			"error_code":   apiErr.GetErrorCode(),
-			"channel_id":   channel.Id,
-			"channel_name": channel.Name,
-		},
+	if startTime.IsZero() {
+		startTime = time.Now()
 	}
-	userId := c.GetInt("id")
-	tokenName := c.GetString("token_name")
-	modelName := c.GetString("original_model")
-	tokenId := c.GetInt("token_id")
-	userGroup := c.GetString("group")
-	startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
-	useTimeSeconds := int(time.Since(startTime).Seconds())
-	model.RecordErrorLogWithType(c, model.LogTypeErrorIntercepted, userId,
-		channel.Id, modelName, tokenName,
-		apiErr.MaskSensitiveErrorWithStatusCode(),
-		tokenId, useTimeSeconds,
-		common.GetContextKeyBool(c, constant.ContextKeyIsStream),
-		userGroup, sameChRetryOther)
+	return startTime
+}
+
+func sftRetryTimeoutRemaining(c *gin.Context, cfg *service.ChannelHealthConfig) (time.Duration, bool) {
+	if cfg == nil || cfg.TotalRetryTimeout <= 0 {
+		return 0, false
+	}
+	remaining := cfg.TotalRetryTimeout - time.Since(relayRequestStartTime(c))
+	return remaining, true
+}
+
+func sftRetryTimedOut(c *gin.Context, cfg *service.ChannelHealthConfig) bool {
+	remaining, enabled := sftRetryTimeoutRemaining(c, cfg)
+	return enabled && remaining <= 0
+}
+
+func relayUpstreamAttemptStartTime(c *gin.Context) time.Time {
+	startTime := common.GetContextKeyTime(c, constant.ContextKeyUpstreamStartedAt)
+	if startTime.IsZero() {
+		startTime = common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
+	}
+	if startTime.IsZero() {
+		startTime = relayRequestStartTime(c)
+	}
+	return startTime
+}
+
+func relayUpstreamAttemptFinishTime(c *gin.Context) time.Time {
+	finishTime := common.GetContextKeyTime(c, constant.ContextKeyUpstreamFinishedAt)
+	if finishTime.IsZero() {
+		finishTime = time.Now()
+	}
+	return finishTime
+}
+
+func relayTimingInfo(c *gin.Context, includeDownstreamFinished bool) map[string]interface{} {
+	timing := map[string]interface{}{}
+	if downstreamReceivedAt := relayRequestStartTime(c); !downstreamReceivedAt.IsZero() {
+		timing["downstream_received_at_ms"] = downstreamReceivedAt.UnixMilli()
+	}
+	if upstreamStartedAt := relayUpstreamAttemptStartTime(c); !upstreamStartedAt.IsZero() {
+		timing["upstream_started_at_ms"] = upstreamStartedAt.UnixMilli()
+	}
+	if upstreamFinishedAt := relayUpstreamAttemptFinishTime(c); !upstreamFinishedAt.IsZero() {
+		timing["upstream_finished_at_ms"] = upstreamFinishedAt.UnixMilli()
+	}
+	if includeDownstreamFinished {
+		timing["downstream_finished_at_ms"] = time.Now().UnixMilli()
+	}
+	return timing
+}
+
+func shouldContinueSequentialFailover(c *gin.Context, openaiErr *types.NewAPIError) bool {
+	if openaiErr == nil {
+		return false
+	}
+	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
+		return false
+	}
+	if _, ok := c.Get("specific_channel_id"); ok {
+		return false
+	}
+	if types.IsSkipRetryError(openaiErr) && !types.IsChannelError(openaiErr) {
+		return false
+	}
+	code := openaiErr.StatusCode
+	return code < 200 || code >= 300
 }
 
 func recordClientVisibleErrorLog(c *gin.Context, apiErr *types.NewAPIError, useChannel []string) {
@@ -145,194 +192,10 @@ func recordClientVisibleErrorLog(c *gin.Context, apiErr *types.NewAPIError, useC
 	other["admin_info"] = map[string]interface{}{
 		"use_channel": useChannel,
 	}
-	startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
-	if startTime.IsZero() {
-		startTime = time.Now()
-	}
+	other["timing"] = relayTimingInfo(c, true)
+	startTime := relayUpstreamAttemptStartTime(c)
 	useTimeSeconds := int(time.Since(startTime).Seconds())
 	model.RecordErrorLogWithType(c, model.LogTypeErrorClientVisible, userId, channelId, modelName, tokenName, apiErr.MaskSensitiveErrorWithStatusCode(), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
-}
-
-type preWarmBatch struct {
-	channels []*model.Channel
-	results  chan []*service.ProbeResult
-}
-
-func selectPreWarmChannels(group string, modelName string, retryIndex int, realTried map[int]bool, currentChannelID int, count int) []*model.Channel {
-	if count <= 0 {
-		return nil
-	}
-	excluded := make(map[int]bool, len(realTried)+count+1)
-	for id, blocked := range realTried {
-		if blocked {
-			excluded[id] = true
-		}
-	}
-	if currentChannelID != 0 {
-		excluded[currentChannelID] = true
-	}
-
-	channels := make([]*model.Channel, 0, count)
-	for priorityRetry := retryIndex; priorityRetry <= common.RetryTimes && len(channels) < count; priorityRetry++ {
-		for len(channels) < count {
-			candidate, _ := model.GetRandomSatisfiedChannel(group, modelName, priorityRetry, excluded)
-			if candidate == nil || excluded[candidate.Id] {
-				break
-			}
-			channels = append(channels, candidate)
-			excluded[candidate.Id] = true
-		}
-	}
-	return channels
-}
-
-func startPreWarmChannels(channels []*model.Channel, modelName string, requestId string) *preWarmBatch {
-	batch := &preWarmBatch{
-		channels: channels,
-		results:  make(chan []*service.ProbeResult, 1),
-	}
-	go func() {
-		if len(channels) == 0 {
-			batch.results <- nil
-			return
-		}
-		batch.results <- service.ProbeNextChannels(channels, modelName, requestId)
-	}()
-	return batch
-}
-
-func waitPreWarmBatch(c *gin.Context, batch *preWarmBatch) ([]*service.ProbeResult, bool) {
-	if batch == nil {
-		return nil, true
-	}
-	select {
-	case results := <-batch.results:
-		return results, true
-	case <-c.Request.Context().Done():
-		return nil, false
-	}
-}
-
-func orderedHealthyPreWarmChannels(batch *preWarmBatch, results []*service.ProbeResult) []*model.Channel {
-	if batch == nil || len(batch.channels) == 0 || len(results) == 0 {
-		return nil
-	}
-	channels := make([]*model.Channel, 0, len(batch.channels))
-	for i, result := range results {
-		if i >= len(batch.channels) {
-			break
-		}
-		if result != nil && result.Success {
-			channels = append(channels, batch.channels[i])
-		}
-	}
-	return channels
-}
-
-func currentPreWarmGroup(c *gin.Context, relayInfo *relaycommon.RelayInfo) string {
-	if relayInfo.TokenGroup == "auto" {
-		if autoGroup := common.GetContextKeyString(c, constant.ContextKeyAutoGroup); autoGroup != "" {
-			return autoGroup
-		}
-	}
-	return relayInfo.TokenGroup
-}
-
-func continueRetryTrace(c *gin.Context, relayFormat types.RelayFormat, relayInfo *relaycommon.RelayInfo, ws *websocket.Conn, requestId string, retryIndex int, currentChannel *model.Channel, currentErr *types.NewAPIError, realTriedChannelIDs map[int]bool, cfg *service.ChannelHealthConfig) (*types.NewAPIError, bool, bool) {
-	if currentErr == nil {
-		return nil, true, true
-	}
-	if service.RequestContextErr(c) != nil {
-		return service.NewRequestCanceledError(c), false, true
-	}
-	if !shouldRetry(c, currentErr, common.RetryTimes-retryIndex) {
-		return currentErr, false, true
-	}
-	if currentErr.StatusCode == http.StatusBadRequest {
-		return currentErr, false, false
-	}
-
-	preWarmChannels := selectPreWarmChannels(
-		currentPreWarmGroup(c, relayInfo),
-		relayInfo.OriginModelName,
-		retryIndex,
-		realTriedChannelIDs,
-		currentChannel.Id,
-		cfg.PreWarmChannelCount,
-	)
-	preWarmBatch := startPreWarmChannels(preWarmChannels, relayInfo.OriginModelName, requestId)
-
-	lastErr := currentErr
-	for retry := 0; retry < common.SameChannelRetryCount; retry++ {
-		if apiErr := service.NewRequestCanceledErrorIfDone(c); apiErr != nil {
-			return apiErr, false, true
-		}
-
-		apiErr := executeRelayAttempt(c, relayFormat, relayInfo, ws)
-		if apiErr == nil {
-			service.OnUserRequestSuccess(currentChannel.Id)
-			return nil, true, true
-		}
-		apiErr = service.NormalizeViolationFeeError(apiErr)
-		relayInfo.LastError = apiErr
-		lastErr = apiErr
-
-		if service.RequestContextErr(c) != nil {
-			return service.NewRequestCanceledError(c), false, true
-		}
-		if !shouldRetry(c, apiErr, common.RetryTimes-retryIndex) {
-			return apiErr, false, true
-		}
-		recordSameChannelRetryIntercepted(c, currentChannel, apiErr, retry+1)
-	}
-
-	service.OnUserRequestError(currentChannel.Id, lastErr.StatusCode, lastErr.Error())
-
-	probeResults, ok := waitPreWarmBatch(c, preWarmBatch)
-	if !ok {
-		return service.NewRequestCanceledError(c), false, true
-	}
-
-	for _, standbyChannel := range orderedHealthyPreWarmChannels(preWarmBatch, probeResults) {
-		if apiErr := service.NewRequestCanceledErrorIfDone(c); apiErr != nil {
-			return apiErr, false, true
-		}
-		if standbyChannel == nil || realTriedChannelIDs[standbyChannel.Id] {
-			continue
-		}
-
-		realTriedChannelIDs[standbyChannel.Id] = true
-		addUsedChannel(c, standbyChannel.Id)
-
-		setupErr := middleware.SetupContextForSelectedChannel(c, standbyChannel, relayInfo.OriginModelName)
-		if setupErr != nil {
-			lastErr = setupErr
-			if !shouldRetry(c, setupErr, common.RetryTimes-retryIndex) {
-				return setupErr, false, true
-			}
-			continue
-		}
-
-		apiErr := executeRelayAttempt(c, relayFormat, relayInfo, ws)
-		if apiErr == nil {
-			service.OnUserRequestSuccess(standbyChannel.Id)
-			return nil, true, true
-		}
-		apiErr = service.NormalizeViolationFeeError(apiErr)
-		relayInfo.LastError = apiErr
-		lastErr = apiErr
-		processChannelError(c, *types.NewChannelError(standbyChannel.Id, standbyChannel.Type, standbyChannel.Name, standbyChannel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), standbyChannel.GetAutoBan()), apiErr)
-
-		nextErr, success, terminal := continueRetryTrace(c, relayFormat, relayInfo, ws, requestId, retryIndex, standbyChannel, apiErr, realTriedChannelIDs, cfg)
-		if success || terminal {
-			return nextErr, success, terminal
-		}
-		if nextErr != nil {
-			lastErr = nextErr
-		}
-	}
-
-	return lastErr, false, false
 }
 
 func Relay(c *gin.Context, relayFormat types.RelayFormat) {
@@ -457,12 +320,18 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
 
-	// NACP: Enhanced retry loop with same-channel retry + rolling pre-warming.
+	// NACP: Simple sequential failover. Each channel in the selected group is
+	// tried with the real user request once; intermediate errors are intercepted,
+	// and the final exhausted error is returned to the client as type 52.
 	realTriedChannelIDs := make(map[int]bool)
-	samePriorityAttempts := 0
 	cfg := service.GetHealthConfig()
 
-	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+	const maxSequentialFailoverAttempts = 100
+	for attempt := 0; attempt < maxSequentialFailoverAttempts; attempt++ {
+		retryParam.SetRetry(attempt)
+		if newAPIError != nil && sftRetryTimedOut(c, cfg) {
+			break
+		}
 		if apiErr := service.NewRequestCanceledErrorIfDone(c); apiErr != nil {
 			newAPIError = apiErr
 			break
@@ -473,13 +342,17 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
-			newAPIError = channelErr
+			if newAPIError == nil {
+				newAPIError = channelErr
+			}
 			break
 		}
 
 		realTriedChannelIDs[channel.Id] = true
 		addUsedChannel(c, channel.Id)
+		common.SetContextKey(c, constant.ContextKeyUpstreamStartedAt, time.Now())
 		newAPIError = executeRelayAttempt(c, relayFormat, relayInfo, ws)
+		common.SetContextKey(c, constant.ContextKeyUpstreamFinishedAt, time.Now())
 
 		if newAPIError == nil {
 			relayInfo.LastError = nil
@@ -492,37 +365,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
-		// NACP: Error classification and retry strategy
-		statusCode := newAPIError.StatusCode
-
-		// Non-retryable errors — break immediately
-		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
+		if !shouldContinueSequentialFailover(c, newAPIError) {
 			break
-		}
-
-		// 400 errors: parameter issue, switch channel immediately (no same-channel retry)
-		if statusCode == 400 {
-			samePriorityAttempts++
-			if samePriorityAttempts >= cfg.MaxRetrySamePriority {
-				retryParam.IncreaseRetry() // force priority drop
-				samePriorityAttempts = 0
-			}
-			continue
-		}
-
-		newAPIError, traceSuccess, terminal := continueRetryTrace(c, relayFormat, relayInfo, ws, requestId, retryParam.GetRetry(), channel, newAPIError, realTriedChannelIDs, cfg)
-		relayInfo.LastError = newAPIError
-		if traceSuccess {
-			return
-		}
-		if terminal {
-			break
-		}
-
-		samePriorityAttempts++
-		if samePriorityAttempts >= cfg.MaxRetrySamePriority {
-			retryParam.IncreaseRetry() // force priority drop
-			samePriorityAttempts = 0
 		}
 	}
 
@@ -593,7 +437,14 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 			AutoBan: &autoBanInt,
 		}, nil
 	}
-	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
+	var channel *model.Channel
+	var selectGroup string
+	var err error
+	if retryParam.ExcludeIDs != nil {
+		channel, selectGroup, err = service.CacheGetNextSatisfiedChannel(retryParam)
+	} else {
+		channel, selectGroup, err = service.CacheGetRandomSatisfiedChannel(retryParam)
+	}
 
 	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
 
@@ -689,10 +540,8 @@ func processChannelErrorWithLogType(c *gin.Context, channelError types.ChannelEr
 		}
 		service.AppendChannelAffinityAdminInfo(c, adminInfo)
 		other["admin_info"] = adminInfo
-		startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
-		if startTime.IsZero() {
-			startTime = time.Now()
-		}
+		other["timing"] = relayTimingInfo(c, false)
+		startTime := relayUpstreamAttemptStartTime(c)
 		useTimeSeconds := int(time.Since(startTime).Seconds())
 		model.RecordErrorLogWithType(c, errorLogType, userId, channelId, modelName, tokenName, err.MaskSensitiveErrorWithStatusCode(), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
 	}

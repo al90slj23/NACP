@@ -143,6 +143,41 @@ func GetChannel(group string, model string, retry int) (*Channel, error) {
 	return &channel, err
 }
 
+func GetNextChannel(group string, model string, excluded map[int]bool) (*Channel, error) {
+	var abilities []Ability
+	query := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true)
+	if len(excluded) > 0 {
+		excludedIDs := make([]int, 0, len(excluded))
+		for id, blocked := range excluded {
+			if blocked {
+				excludedIDs = append(excludedIDs, id)
+			}
+		}
+		if len(excludedIDs) > 0 {
+			query = query.Where("channel_id NOT IN ?", excludedIDs)
+		}
+	}
+	if err := query.Order("priority DESC, weight DESC, channel_id ASC").Find(&abilities).Error; err != nil {
+		return nil, err
+	}
+	if len(abilities) == 0 {
+		return nil, nil
+	}
+
+	for _, ability := range abilities {
+		channel := Channel{}
+		if err := DB.First(&channel, "id = ?", ability.ChannelId).Error; err != nil {
+			return nil, err
+		}
+		if channel.Status != common.ChannelStatusEnabled {
+			continue
+		}
+		return &channel, nil
+	}
+
+	return nil, nil
+}
+
 func (channel *Channel) AddAbilities(tx *gorm.DB) error {
 	models_ := strings.Split(channel.Models, ",")
 	groups_ := strings.Split(channel.Group, ",")

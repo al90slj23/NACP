@@ -170,6 +170,15 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 		CacheCreationRatio1h: relayInfo.PriceData.CacheCreation1hRatio,
 		UsageSemantic:        usageSemanticFromUsage(relayInfo, usage),
 	}
+	if upstreamStartedAt := common.GetContextKeyTime(ctx, constant.ContextKeyUpstreamStartedAt); !upstreamStartedAt.IsZero() {
+		upstreamFinishedAt := common.GetContextKeyTime(ctx, constant.ContextKeyUpstreamFinishedAt)
+		if upstreamFinishedAt.IsZero() {
+			upstreamFinishedAt = time.Now()
+		}
+		if upstreamFinishedAt.After(upstreamStartedAt) {
+			summary.UseTimeSeconds = int64(upstreamFinishedAt.Sub(upstreamStartedAt).Seconds())
+		}
+	}
 	summary.IsClaudeUsageSemantic = summary.UsageSemantic == "anthropic"
 
 	if usage == nil {

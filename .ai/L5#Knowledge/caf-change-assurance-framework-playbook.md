@@ -89,6 +89,18 @@ Local PASS -> Test Server PASS -> Production Deploy + Observe
 
 ### Stage A：本地开发环境
 
+NACP 日常本地测试约定：
+
+| 项 | 约定 |
+|----|------|
+| 本地前端入口 | `http://localhost:5173/` |
+| 本地 dashboard/admin/user API | 优先走 `http://localhost:5173/api/*` |
+| 本地 relay API | 读取 `/api/status.server_address` 后调用本地后端，例如 `http://localhost:3000/v1/*` |
+| 本地开发环境 | 默认用户已经打开前后端；测试只探测和复用，不主动启动/重启/kill/换端口 |
+| 数据库 | 本地 Stage A 使用本地隔离数据库，默认 Docker MySQL `nacp-mysql-dev`，`127.0.0.1:3307/nacp_dev` |
+| 数据库直连 | 非默认路径；只有 API 无法证明问题时才作为补充证据 |
+| 测试目标 | 优先验证本地代码版本在本地隔离数据上的真实行为 |
+
 | ID | 场景 | 命令/API/页面 | 预期 | 证据 | 结论 |
 |----|------|---------------|------|------|------|
 | L-001 | 相关单元测试 | `go test ...` / `bunx vitest ...` | PASS | 输出摘要 | 未执行 |
@@ -96,6 +108,10 @@ Local PASS -> Test Server PASS -> Production Deploy + Observe
 | L-003 | 本地前端显示 | `http://localhost:5173/...` | 展示正确 | 截图或字段说明 | 未执行 |
 
 本地未通过时，禁止进入测试服务器。
+
+如果 `http://localhost:5173/api/status` 或 `server_address` 不可达，记录为 Stage A 环境门禁失败并报告用户。除非用户明确要求处理本地环境，否则不要启动、重启、停止或替换用户已经打开的开发进程。
+
+本地 Stage A 不再默认连接 `nacp.m.srl` 测试站数据库。若本地 `.env` 仍指向测试站数据库，必须先切换到本地数据库或使用临时本地后端进程再执行可写测试。
 
 ### Stage B：线上测试服务器
 
@@ -107,6 +123,8 @@ Local PASS -> Test Server PASS -> Production Deploy + Observe
 | T-004 | 前端测试站显示 | 测试站页面 | 展示正确 | 截图或字段说明 | 未执行 |
 
 测试服务器未通过时，禁止部署正式服务器。
+
+如果 Stage B 需要同步 Stage A 的测试基线，必须使用明确的 Docker 镜像、迁移脚本或数据库快照；线上测试站数据库和本地数据库保持生命周期分离，不能共用同一个实时数据库。
 
 ### Stage C：正式服务器部署后观察
 
@@ -137,7 +155,37 @@ Local PASS -> Test Server PASS -> Production Deploy + Observe
 
 ---
 
-## 五、CAF 输出结论模板
+## 五、API 驱动测试夹具路径
+
+NACP 的真实测试应优先用 API 构造测试夹具，而不是直接写数据库。
+
+标准路径：
+
+```text
+1. 管理员 API 创建/调整测试渠道、失效渠道、分组、优先级
+2. 普通用户 API 注册/登录
+3. 普通用户 API 创建 token，选择测试分组和模型限制
+4. Relay API 发起真实模型请求
+5. 管理员 API 查询 grouped/trace/traces/stat
+6. 前端 /console/log 验证展示层
+7. 管理员 API 恢复或删除测试渠道
+```
+
+对应规范：
+
+```text
+.ai/L3#Standards/standards/06.quality-04.api-driven-test-fixtures.md
+```
+
+特别注意：
+
+1. DB seed 只能用于 UI fixture 或旧日志兼容，不等价于真实链路测试。
+2. 真实 SFT 测试必须通过 API 制造 A/B/C 渠道不同健康状态和顺位。
+3. 测试记录只保存 request_id、log_id、渠道名/ID、非敏感字段，不保存 key。
+
+---
+
+## 六、CAF 输出结论模板
 
 ```text
 结论：通过 / 有条件通过 / 不通过
@@ -163,11 +211,11 @@ Local PASS -> Test Server PASS -> Production Deploy + Observe
 
 ---
 
-## 六、日志页与链路功能测试经验
+## 七、日志页与链路功能测试经验
 
 来源：2026-05-16 本地 `http://localhost:5173/console/log` 空表排查。
 
-### 6.1 先用 API 定位，不先截图模拟
+### 7.1 先用 API 定位，不先截图模拟
 
 日志、trace、计费、统计类问题不要先从浏览器交互开始。标准顺序：
 
@@ -177,13 +225,13 @@ Local PASS -> Test Server PASS -> Production Deploy + Observe
 3. curl /api/log/grouped，检查列表原始数据
 4. curl /api/log/trace?request_id=...，检查单条链路详情
 5. curl /api/log/traces，检查链路摘要聚合
-6. 必要时查 DB 原始 logs 行
+6. 只有 API 证据不足时，才查 DB 原始 logs 行
 7. 最后打开 /console/log 验证展示层
 ```
 
 原因：前端日志页会做二次派生，包括隐藏、折叠、生成 20/50 摘要、把 `trace_role` 映射成 21/29/51/52/59。直接看页面容易把数据问题误判为 UI 问题，或把 UI 派生问题误判为底层逻辑问题。
 
-### 6.2 `/api/log/grouped` 默认列表检查
+### 7.2 `/api/log/grouped` 默认列表检查
 
 必查字段：
 
@@ -205,7 +253,7 @@ Local PASS -> Test Server PASS -> Production Deploy + Observe
 3. 有 `request_id` 的 probe 属于真实请求链路，必须保留给 trace 展开使用。
 4. 默认日志列表不应该被后台健康任务、周期 probe、异步维护日志污染。
 
-### 6.3 `/api/log/traces` 摘要聚合检查
+### 7.3 `/api/log/traces` 摘要聚合检查
 
 必须验证：
 

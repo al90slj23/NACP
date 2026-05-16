@@ -54,11 +54,19 @@ func InitChannelCache() {
 		}
 	}
 
-	// sort by priority
+	// Sort for deterministic sequential failover: priority first, then weight.
 	for group, model2channels := range newGroup2model2channels {
 		for model, channels := range model2channels {
 			sort.Slice(channels, func(i, j int) bool {
-				return newChannelId2channel[channels[i]].GetPriority() > newChannelId2channel[channels[j]].GetPriority()
+				left := newChannelId2channel[channels[i]]
+				right := newChannelId2channel[channels[j]]
+				if left.GetPriority() != right.GetPriority() {
+					return left.GetPriority() > right.GetPriority()
+				}
+				if left.GetWeight() != right.GetWeight() {
+					return left.GetWeight() > right.GetWeight()
+				}
+				return left.Id < right.Id
 			})
 			newGroup2model2channels[group][model] = channels
 		}
@@ -226,6 +234,44 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, excludeIDs
 	}
 	// return null if no channel is not found
 	return nil, errors.New("channel not found")
+}
+
+// GetNextSatisfiedChannel returns the next enabled channel in priority order,
+// excluding channels that were already tried in the current relay chain. The
+// sequential failover chain intentionally does not skip degraded channels: the
+// user request itself is the source of truth for this chain.
+func GetNextSatisfiedChannel(group string, model string, excluded map[int]bool) (*Channel, error) {
+	if !common.MemoryCacheEnabled {
+		return GetNextChannel(group, model, excluded)
+	}
+
+	channelSyncLock.RLock()
+	defer channelSyncLock.RUnlock()
+
+	channels := group2model2channels[group][model]
+	if len(channels) == 0 {
+		normalizedModel := ratio_setting.FormatMatchingModelName(model)
+		channels = group2model2channels[group][normalizedModel]
+	}
+	if len(channels) == 0 {
+		return nil, nil
+	}
+
+	for _, channelId := range channels {
+		if excluded != nil && excluded[channelId] {
+			continue
+		}
+		channel, ok := channelsIDM[channelId]
+		if !ok {
+			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
+		}
+		if channel.Status != common.ChannelStatusEnabled {
+			continue
+		}
+		return channel, nil
+	}
+
+	return nil, nil
 }
 
 func CacheGetChannel(id int) (*Channel, error) {

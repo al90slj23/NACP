@@ -20,6 +20,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -28,33 +29,60 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/bytedance/gopkg/util/gopool"
+	"github.com/shopspring/decimal"
 )
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 // ProbeResult holds the outcome of a single probe request.
 type ProbeResult struct {
-	ChannelID  int
-	ModelName  string
-	Success    bool
-	StatusCode int
-	LatencyMs  int64
-	Error      error
-	Timestamp  time.Time
+	ChannelID           int
+	ModelName           string
+	Success             bool
+	StatusCode          int
+	LatencyMs           int64
+	Error               error
+	Timestamp           time.Time
+	PromptTokens        int
+	CompletionTokens    int
+	CacheReadTokens     int
+	CacheCreationTokens int
+	EstimatedQuota      int
 }
 
 // ProbeLog represents a probe execution record for cost tracking.
 type ProbeLog struct {
-	ChannelID   int    `json:"channel_id"`
-	ChannelName string `json:"channel_name"`
-	ModelName   string `json:"model_name"`
-	Success     bool   `json:"success"`
-	LatencyMs   int64  `json:"latency_ms"`
-	StatusCode  int    `json:"status_code"`
-	Trigger     string `json:"trigger"` // "pre_warm", "degraded_probe"
-	Error       string `json:"error"`   // error message for failed probes
-	Timestamp   int64  `json:"timestamp"`
+	ChannelID           int    `json:"channel_id"`
+	ChannelName         string `json:"channel_name"`
+	ModelName           string `json:"model_name"`
+	Success             bool   `json:"success"`
+	LatencyMs           int64  `json:"latency_ms"`
+	StatusCode          int    `json:"status_code"`
+	Trigger             string `json:"trigger"` // "pre_warm", "degraded_probe"
+	Error               string `json:"error"`   // error message for failed probes
+	Timestamp           int64  `json:"timestamp"`
+	PromptTokens        int    `json:"prompt_tokens"`
+	CompletionTokens    int    `json:"completion_tokens"`
+	CacheReadTokens     int    `json:"cache_read_tokens"`
+	CacheCreationTokens int    `json:"cache_creation_tokens"`
+	EstimatedQuota      int    `json:"estimated_quota"`
+}
+
+type probeUsage struct {
+	PromptTokens        int
+	CompletionTokens    int
+	CacheReadTokens     int
+	CacheCreationTokens int
+}
+
+func (u probeUsage) totalTokens() int {
+	return u.PromptTokens + u.CompletionTokens + u.CacheReadTokens + u.CacheCreationTokens
+}
+
+func (u probeUsage) hasUsage() bool {
+	return u.totalTokens() > 0
 }
 
 // ─── HTTP Client ──────────────────────────────────────────────────────────────
@@ -128,6 +156,17 @@ func ProbeChannel(channel *model.Channel, modelName string) *ProbeResult {
 
 	result.StatusCode = resp.StatusCode
 	result.Success = resp.StatusCode >= 200 && resp.StatusCode < 300
+	if result.Success {
+		bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if readErr == nil {
+			usage := parseProbeUsage(bodyBytes)
+			result.PromptTokens = usage.PromptTokens
+			result.CompletionTokens = usage.CompletionTokens
+			result.CacheReadTokens = usage.CacheReadTokens
+			result.CacheCreationTokens = usage.CacheCreationTokens
+			result.EstimatedQuota = estimateProbeQuota(modelName, usage)
+		}
+	}
 
 	return result
 }
@@ -157,15 +196,20 @@ func ProbeNextChannels(channels []*model.Channel, modelName string, requestId st
 				errMsg = results[idx].Error.Error()
 			}
 			recordProbeLog(&ProbeLog{
-				ChannelID:   channel.Id,
-				ChannelName: channel.Name,
-				ModelName:   modelName,
-				Success:     results[idx].Success,
-				LatencyMs:   results[idx].LatencyMs,
-				StatusCode:  results[idx].StatusCode,
-				Trigger:     "pre_warm",
-				Error:       errMsg,
-				Timestamp:   time.Now().Unix(),
+				ChannelID:           channel.Id,
+				ChannelName:         channel.Name,
+				ModelName:           modelName,
+				Success:             results[idx].Success,
+				LatencyMs:           results[idx].LatencyMs,
+				StatusCode:          results[idx].StatusCode,
+				Trigger:             "pre_warm",
+				Error:               errMsg,
+				Timestamp:           time.Now().Unix(),
+				PromptTokens:        results[idx].PromptTokens,
+				CompletionTokens:    results[idx].CompletionTokens,
+				CacheReadTokens:     results[idx].CacheReadTokens,
+				CacheCreationTokens: results[idx].CacheCreationTokens,
+				EstimatedQuota:      results[idx].EstimatedQuota,
 			}, requestId)
 		})
 	}
@@ -208,6 +252,102 @@ func buildProbeRequestBody(modelName string) ([]byte, error) {
 	return common.Marshal(body)
 }
 
+func parseProbeUsage(body []byte) probeUsage {
+	if len(body) == 0 {
+		return probeUsage{}
+	}
+	var payload struct {
+		Usage struct {
+			PromptTokens      int `json:"prompt_tokens"`
+			CompletionTokens  int `json:"completion_tokens"`
+			InputTokens       int `json:"input_tokens"`
+			OutputTokens      int `json:"output_tokens"`
+			InputTokensCamel  int `json:"inputTokens"`
+			OutputTokensCamel int `json:"outputTokens"`
+
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			PromptTokensDetails      struct {
+				CachedTokens         int `json:"cached_tokens"`
+				CachedCreationTokens int `json:"cached_creation_tokens"`
+			} `json:"prompt_tokens_details"`
+			InputTokensDetails struct {
+				CachedTokens         int `json:"cached_tokens"`
+				CachedCreationTokens int `json:"cached_creation_tokens"`
+			} `json:"input_tokens_details"`
+			CacheCreation struct {
+				Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+				Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+			} `json:"cache_creation"`
+		} `json:"usage"`
+	}
+	if err := common.Unmarshal(body, &payload); err != nil {
+		return probeUsage{}
+	}
+
+	usage := probeUsage{
+		PromptTokens:        payload.Usage.PromptTokens,
+		CompletionTokens:    payload.Usage.CompletionTokens,
+		CacheReadTokens:     payload.Usage.CacheReadInputTokens,
+		CacheCreationTokens: payload.Usage.CacheCreationInputTokens,
+	}
+	if usage.PromptTokens == 0 {
+		usage.PromptTokens = payload.Usage.InputTokens
+	}
+	if usage.PromptTokens == 0 {
+		usage.PromptTokens = payload.Usage.InputTokensCamel
+	}
+	if usage.CompletionTokens == 0 {
+		usage.CompletionTokens = payload.Usage.OutputTokens
+	}
+	if usage.CompletionTokens == 0 {
+		usage.CompletionTokens = payload.Usage.OutputTokensCamel
+	}
+	if usage.CacheReadTokens == 0 {
+		usage.CacheReadTokens = payload.Usage.PromptTokensDetails.CachedTokens
+	}
+	if usage.CacheReadTokens == 0 {
+		usage.CacheReadTokens = payload.Usage.InputTokensDetails.CachedTokens
+	}
+	if usage.CacheCreationTokens == 0 {
+		usage.CacheCreationTokens = payload.Usage.PromptTokensDetails.CachedCreationTokens
+	}
+	if usage.CacheCreationTokens == 0 {
+		usage.CacheCreationTokens = payload.Usage.InputTokensDetails.CachedCreationTokens
+	}
+	if usage.CacheCreationTokens == 0 {
+		usage.CacheCreationTokens = payload.Usage.CacheCreation.Ephemeral5mInputTokens + payload.Usage.CacheCreation.Ephemeral1hInputTokens
+	}
+	return usage
+}
+
+func estimateProbeQuota(modelName string, usage probeUsage) int {
+	if usage.totalTokens() == 0 {
+		return 0
+	}
+	modelRatio, ok, _ := ratio_setting.GetModelRatio(modelName)
+	if !ok || modelRatio <= 0 {
+		return 0
+	}
+	completionRatio := ratio_setting.GetCompletionRatio(modelName)
+	cacheRatio, _ := ratio_setting.GetCacheRatio(modelName)
+	cacheCreationRatio, _ := ratio_setting.GetCreateCacheRatio(modelName)
+
+	quota := decimal.NewFromInt(int64(usage.PromptTokens)).
+		Add(decimal.NewFromInt(int64(usage.CompletionTokens)).Mul(decimal.NewFromFloat(completionRatio))).
+		Add(decimal.NewFromInt(int64(usage.CacheReadTokens)).Mul(decimal.NewFromFloat(cacheRatio))).
+		Add(decimal.NewFromInt(int64(usage.CacheCreationTokens)).Mul(decimal.NewFromFloat(cacheCreationRatio))).
+		Mul(decimal.NewFromFloat(modelRatio))
+	if quota.LessThanOrEqual(decimal.Zero) {
+		return 0
+	}
+	rounded := int(quota.Round(0).IntPart())
+	if rounded == 0 {
+		return 1
+	}
+	return rounded
+}
+
 // getProbeEndpoint returns the full URL for the probe request based on channel type.
 func getProbeEndpoint(channel *model.Channel) string {
 	baseURL := channel.GetBaseURL()
@@ -246,7 +386,7 @@ func getProbeAuthHeader(channel *model.Channel) string {
 
 // recordProbeLog records probe execution to the logs table.
 // Uses gopool.Go for async write to avoid blocking the probe/retry flow.
-// user_id=0, quota=0 ensures no billing impact.
+// user_id=0 ensures no user billing impact; quota is only a platform-cost estimate for log display.
 func recordProbeLog(probeLog *ProbeLog, requestId string) {
 	if probeLog == nil {
 		return
@@ -263,14 +403,34 @@ func recordProbeLog(probeLog *ProbeLog, requestId string) {
 		logType = model.LogTypeProbeFailed
 	}
 
+	hasUsage := probeUsage{
+		PromptTokens:        probeLog.PromptTokens,
+		CompletionTokens:    probeLog.CompletionTokens,
+		CacheReadTokens:     probeLog.CacheReadTokens,
+		CacheCreationTokens: probeLog.CacheCreationTokens,
+	}.hasUsage()
+
 	// Build Other field
 	other := map[string]interface{}{
-		"probe_trigger": probeLog.Trigger,
+		"probe_trigger":        probeLog.Trigger,
+		"cost_scope":           "platform",
+		"cost_reason":          "lightweight_probe",
+		"probe_usage_recorded": hasUsage,
+		"quota_estimated":      hasUsage && probeLog.EstimatedQuota > 0,
 		"admin_info": map[string]interface{}{
 			"status_code":  probeLog.StatusCode,
 			"latency_ms":   probeLog.LatencyMs,
 			"channel_name": probeLog.ChannelName,
 		},
+	}
+	if hasUsage {
+		other["probe_usage_source"] = "upstream_response"
+	}
+	if probeLog.CacheReadTokens > 0 {
+		other["cache_tokens"] = probeLog.CacheReadTokens
+	}
+	if probeLog.CacheCreationTokens > 0 {
+		other["cache_creation_tokens"] = probeLog.CacheCreationTokens
 	}
 	if !probeLog.Success && probeLog.Error != "" {
 		other["error"] = probeLog.Error
@@ -281,24 +441,28 @@ func recordProbeLog(probeLog *ProbeLog, requestId string) {
 	useTimeSec := int((probeLog.LatencyMs + 999) / 1000)
 
 	log := &model.Log{
-		UserId:    0, // probe cost not billed to any user
-		Username:  "",
-		CreatedAt: probeLog.Timestamp,
-		Type:      logType,
-		Content:   fmt.Sprintf("probe %s channel #%d", probeLog.ModelName, probeLog.ChannelID),
-		ModelName: probeLog.ModelName,
-		Quota:     0,
-		ChannelId: probeLog.ChannelID,
-		UseTime:   useTimeSec,
-		RequestId: requestId,
-		Other:     otherStr,
+		UserId:           0, // probe cost not billed to any user
+		Username:         "",
+		CreatedAt:        probeLog.Timestamp,
+		Type:             logType,
+		Content:          fmt.Sprintf("probe %s channel #%d", probeLog.ModelName, probeLog.ChannelID),
+		ModelName:        probeLog.ModelName,
+		Quota:            probeLog.EstimatedQuota,
+		PromptTokens:     probeLog.PromptTokens,
+		CompletionTokens: probeLog.CompletionTokens,
+		ChannelId:        probeLog.ChannelID,
+		UseTime:          useTimeSec,
+		RequestId:        requestId,
+		Other:            otherStr,
 	}
 	model.ApplyLogTraceFields(log)
 
 	gopool.Go(func() {
 		if err := model.LOG_DB.Create(log).Error; err != nil {
 			common.SysLog("failed to record probe log: " + err.Error())
+			return
 		}
+		model.FinalizeTraceAfterLogCreated(log)
 	})
 }
 
@@ -348,15 +512,20 @@ func probeDegradedChannels() {
 			errMsg = result.Error.Error()
 		}
 		recordProbeLog(&ProbeLog{
-			ChannelID:   id,
-			ChannelName: channel.Name,
-			ModelName:   modelName,
-			Success:     result.Success,
-			LatencyMs:   result.LatencyMs,
-			StatusCode:  result.StatusCode,
-			Trigger:     "degraded_probe",
-			Error:       errMsg,
-			Timestamp:   time.Now().Unix(),
+			ChannelID:           id,
+			ChannelName:         channel.Name,
+			ModelName:           modelName,
+			Success:             result.Success,
+			LatencyMs:           result.LatencyMs,
+			StatusCode:          result.StatusCode,
+			Trigger:             "degraded_probe",
+			Error:               errMsg,
+			Timestamp:           time.Now().Unix(),
+			PromptTokens:        result.PromptTokens,
+			CompletionTokens:    result.CompletionTokens,
+			CacheReadTokens:     result.CacheReadTokens,
+			CacheCreationTokens: result.CacheCreationTokens,
+			EstimatedQuota:      result.EstimatedQuota,
 		}, "") // empty requestId — degraded probe not linked to any user request
 
 		// Small delay between probes to avoid burst

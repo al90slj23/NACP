@@ -17,9 +17,9 @@ func cleanLogs(t *testing.T) {
 }
 
 // Feature: request-trace-view, Property 1: 链路详情查询过滤与排序
-// For any set of Log records sharing the same request_id with random types (1/2/3/4/5/51/52),
+// For any set of Log records sharing the same request_id with random types,
 // calling GetTraceDetail should return steps that:
-// (a) only contain stored type ∈ {2, 5}; type 51/52 inputs are normalized on write.
+// (a) only contain trace detail event types; summary rows are excluded.
 // (b) are ordered by trace_seq ASC when present, otherwise created_at ASC
 // (c) count ≤ 100
 // **Validates: Requirements 1.1**
@@ -33,7 +33,7 @@ func TestTraceProperty1_DetailFilterAndSort(t *testing.T) {
 		requestId := fmt.Sprintf("req_%s", rapid.StringMatching(`[a-z0-9]{8,16}`).Draw(t, "requestId"))
 		numLogs := rapid.IntRange(1, 30).Draw(t, "numLogs")
 
-		allTypes := []int{1, 2, 3, 4, 5, 51, 52}
+		allTypes := []int{1, 2, 3, 4, 5, 20, 21, 29, 50, 51, 52, 59}
 		var baseTime int64 = 1700000000
 
 		for i := 0; i < numLogs; i++ {
@@ -59,14 +59,20 @@ func TestTraceProperty1_DetailFilterAndSort(t *testing.T) {
 			t.Fatalf("GetTraceDetail error: %v", err)
 		}
 
-		// (a) Only valid stored types
-		validTypes := map[int]bool{2: true, 5: true, 4: true}
+		// (a) Only valid trace detail event types. 20/50 summary rows are main-list
+		// records and should not appear in detail steps.
+		validTypes := map[int]bool{
+			model.LogTypeConsume:            true,
+			model.LogTypeRetryConsume:       true,
+			model.LogTypeProbeSuccess:       true,
+			model.LogTypeProbeFailed:        true,
+			model.LogTypeError:              true,
+			model.LogTypeErrorIntercepted:   true,
+			model.LogTypeErrorClientVisible: true,
+		}
 		for _, step := range detail.Steps {
 			if !validTypes[step.Type] {
-				t.Fatalf("step has invalid type %d, expected one of {2, 4, 5}", step.Type)
-			}
-			if step.Type == model.LogTypeSystem && step.TraceRole != model.TraceRoleProbeSuccess {
-				t.Fatalf("type=4 trace detail step must be probe_success, got trace_role=%q", step.TraceRole)
+				t.Fatalf("step has invalid trace detail type %d", step.Type)
 			}
 		}
 
@@ -119,7 +125,7 @@ func TestTraceDetailIncludesProbeLogs(t *testing.T) {
 	if len(detail.Steps) != len(rows) {
 		t.Fatalf("expected %d steps, got %d", len(rows), len(detail.Steps))
 	}
-	expectedTypes := []int{model.LogTypeError, model.LogTypeSystem, model.LogTypeError, model.LogTypeError}
+	expectedTypes := []int{model.LogTypeErrorIntercepted, model.LogTypeProbeSuccess, model.LogTypeProbeFailed, model.LogTypeErrorClientVisible}
 	expectedRoles := []string{model.TraceRoleErrorIntercepted, model.TraceRoleProbeSuccess, model.TraceRoleProbeFailed, model.TraceRoleErrorVisible}
 	for i, expectedType := range expectedTypes {
 		if detail.Steps[i].Type != expectedType {
@@ -209,6 +215,69 @@ func TestTraceListCollapsesProbeRowsIntoSingleSummary(t *testing.T) {
 	if summary.TotalQuota != 111 || summary.TotalPromptTokens != 121 || summary.TotalCompletionTokens != 20 {
 		t.Fatalf("unexpected totals: quota=%d prompt=%d completion=%d",
 			summary.TotalQuota, summary.TotalPromptTokens, summary.TotalCompletionTokens)
+	}
+}
+
+func TestTraceListUsesMaterializedSummaryForBillingTotals(t *testing.T) {
+	cleanLogs(t)
+	model.LOG_DB.Exec("DELETE FROM logs")
+
+	const requestId = "trace_list_materialized_summary_totals"
+	rows := []model.Log{
+		{
+			RequestId: requestId,
+			TraceId:   requestId,
+			Type:      model.LogTypeErrorIntercepted,
+			CreatedAt: 800,
+			ChannelId: 12,
+			ModelName: "claude-haiku-4-5-20251001",
+			Username:  "trace_user",
+			TokenName: "trace_token",
+		},
+		{
+			RequestId:        requestId,
+			TraceId:          requestId,
+			Type:             model.LogTypeRetryConsume,
+			CreatedAt:        801,
+			ChannelId:        13,
+			ModelName:        "claude-haiku-4-5-20251001",
+			Username:         "trace_user",
+			TokenName:        "trace_token",
+			Quota:            123,
+			PromptTokens:     11,
+			CompletionTokens: 22,
+		},
+	}
+	for _, row := range rows {
+		if err := model.LOG_DB.Create(&row).Error; err != nil {
+			t.Fatalf("failed to insert log: %v", err)
+		}
+	}
+	summary, err := model.UpsertTraceSummary(requestId)
+	if err != nil {
+		t.Fatalf("UpsertTraceSummary error: %v", err)
+	}
+	if summary == nil || summary.Type != model.LogTypeRetrySuccessSummary {
+		t.Fatalf("expected success summary, got %#v", summary)
+	}
+
+	results, total, err := GetTraceList(TraceListParams{Page: 1, PageSize: 20})
+	if err != nil {
+		t.Fatalf("GetTraceList error: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("expected total=1, got %d", total)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected one result, got %d: %#v", len(results), results)
+	}
+	got := results[0]
+	if got.RequestId != requestId || got.Status != "success" {
+		t.Fatalf("unexpected summary identity/status: %#v", got)
+	}
+	if got.TotalQuota != 123 || got.TotalPromptTokens != 11 || got.TotalCompletionTokens != 22 {
+		t.Fatalf("summary totals should use materialized 20 only, got quota=%d prompt=%d completion=%d",
+			got.TotalQuota, got.TotalPromptTokens, got.TotalCompletionTokens)
 	}
 }
 

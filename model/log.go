@@ -42,6 +42,9 @@ type Log struct {
 	TraceParentId    int    `json:"trace_parent_id,omitempty" gorm:"index;default:0"`
 	TraceSiblingSeq  int    `json:"trace_sibling_seq,omitempty" gorm:"default:0"`
 	TraceRole        string `json:"trace_role,omitempty" gorm:"type:varchar(32);index;default:''"`
+	SummaryLogId     int    `json:"summary_log_id,omitempty" gorm:"index;default:0"`
+	TerminalLogId    int    `json:"terminal_log_id,omitempty" gorm:"index;default:0"`
+	TraceVersion     int    `json:"trace_version,omitempty" gorm:"default:0"`
 	Other            string `json:"other"`
 }
 
@@ -55,17 +58,20 @@ const (
 	LogTypeError   = 5 // Legacy: all errors (kept for historical data compatibility)
 	LogTypeRefund  = 6
 
-	// NACP: input-only retry roles. They are normalized before storage; logs.type
-	// remains compatible with legacy NewAPI values.
-	LogTypeErrorIntercepted   = 51 // Error intercepted by retry system (client did NOT see this error)
-	LogTypeErrorClientVisible = 52 // Error returned to client (all retries exhausted)
+	// NACP: materialized SFT summary and step log types.
+	LogTypeRetrySuccessSummary = 20 // Retry chain completed successfully; request-level summary row.
+	LogTypeRetryConsume        = 21 // Terminal successful consume inside a retry chain.
+	LogTypeRetryFailedSummary  = 50 // Retry chain exhausted/failed; request-level summary row.
+	LogTypeErrorIntercepted    = 51 // Error intercepted by retry system (client did NOT see this error)
+	LogTypeErrorClientVisible  = 52 // Error returned to client (all retries exhausted)
 
-	// NACP: input-only probe roles. They are normalized before storage.
 	LogTypeProbeSuccess = 29 // Probe request succeeded (lightweight health check)
 	LogTypeProbeFailed  = 59 // Probe request failed (timeout or non-2xx)
 )
 
 const (
+	TraceRoleSummarySuccess   = "summary_success"
+	TraceRoleSummaryFailed    = "summary_failed"
 	TraceRoleConsume          = "consume"
 	TraceRoleErrorLegacy      = "error_legacy"
 	TraceRoleErrorIntercepted = "error_intercepted"
@@ -84,6 +90,12 @@ func traceRoleForLogType(logType int) string {
 	switch logType {
 	case LogTypeConsume:
 		return TraceRoleConsume
+	case LogTypeRetrySuccessSummary:
+		return TraceRoleSummarySuccess
+	case LogTypeRetryConsume:
+		return TraceRoleConsume
+	case LogTypeRetryFailedSummary:
+		return TraceRoleSummaryFailed
 	case LogTypeError:
 		return TraceRoleErrorLegacy
 	case LogTypeErrorIntercepted:
@@ -100,17 +112,35 @@ func traceRoleForLogType(logType int) string {
 }
 
 func normalizeLogTypeForStorage(logType int) int {
-	switch logType {
-	case LogTypeErrorIntercepted, LogTypeErrorClientVisible, LogTypeProbeFailed:
-		return LogTypeError
-	case LogTypeProbeSuccess:
-		return LogTypeSystem
-	case 20, 21:
-		return LogTypeConsume
-	case 50:
-		return LogTypeError
+	return logType
+}
+
+func isTraceSummaryLogType(logType int) bool {
+	return logType == LogTypeRetrySuccessSummary || logType == LogTypeRetryFailedSummary
+}
+
+func isTraceTerminalLog(log *Log) bool {
+	if log == nil {
+		return false
+	}
+	switch log.Type {
+	case LogTypeRetryConsume, LogTypeErrorClientVisible:
+		return true
+	case LogTypeConsume:
+		return log.TraceSeq > 1 || log.TraceRole == TraceRoleConsume
+	case LogTypeError:
+		return log.TraceRole == TraceRoleErrorVisible
 	default:
-		return logType
+		return false
+	}
+}
+
+func isTraceChildLogType(logType int) bool {
+	switch logType {
+	case LogTypeRetryConsume, LogTypeProbeSuccess, LogTypeProbeFailed, LogTypeErrorIntercepted, LogTypeErrorClientVisible:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -152,6 +182,12 @@ func applyLogTraceFields(log *Log, db *gorm.DB) {
 		log.TraceRole = traceRoleForLogType(log.Type)
 	}
 	log.Type = normalizeLogTypeForStorage(log.Type)
+	if log.TraceVersion == 0 && (isTraceChildLogType(log.Type) || isTraceSummaryLogType(log.Type)) {
+		log.TraceVersion = 1
+	}
+	if isTraceSummaryLogType(log.Type) {
+		return
+	}
 	if log.TraceSeq == 0 {
 		log.TraceSeq = nextTraceSeqWithDB(db, log.TraceId)
 	}
@@ -167,6 +203,317 @@ func ApplyLogTraceFields(log *Log) {
 func (log *Log) BeforeCreate(tx *gorm.DB) error {
 	applyLogTraceFields(log, tx)
 	return nil
+}
+
+func hasExistingSFTTraceSteps(requestId string) bool {
+	if requestId == "" || LOG_DB == nil {
+		return false
+	}
+	var count int64
+	err := LOG_DB.Model(&Log{}).
+		Where("(trace_id = ? OR request_id = ?) AND type IN ?", requestId, requestId, []int{
+			LogTypeErrorIntercepted,
+			LogTypeProbeSuccess,
+			LogTypeProbeFailed,
+			LogTypeErrorClientVisible,
+			LogTypeRetryConsume,
+			LogTypeRetrySuccessSummary,
+			LogTypeRetryFailedSummary,
+		}).
+		Count(&count).Error
+	return err == nil && count > 0
+}
+
+func traceTerminalRank(log Log) int {
+	switch log.Type {
+	case LogTypeErrorClientVisible:
+		return 2
+	case LogTypeRetryConsume:
+		return 1
+	case LogTypeError:
+		if log.TraceRole == TraceRoleErrorVisible {
+			return 2
+		}
+	case LogTypeConsume:
+		if log.TraceSeq > 1 {
+			return 1
+		}
+	}
+	return 0
+}
+
+func betterTraceTerminal(candidate Log, current *Log) bool {
+	if traceTerminalRank(candidate) == 0 {
+		return false
+	}
+	if current == nil {
+		return true
+	}
+	if candidate.TraceSeq != current.TraceSeq {
+		return candidate.TraceSeq > current.TraceSeq
+	}
+	if candidate.CreatedAt != current.CreatedAt {
+		return candidate.CreatedAt > current.CreatedAt
+	}
+	return candidate.Id > current.Id
+}
+
+func traceSummaryTypeForTerminal(terminal Log) int {
+	if terminal.Type == LogTypeRetryConsume || terminal.Type == LogTypeConsume || terminal.TraceRole == TraceRoleConsume {
+		return LogTypeRetrySuccessSummary
+	}
+	return LogTypeRetryFailedSummary
+}
+
+func traceSummaryRoleForType(logType int) string {
+	if logType == LogTypeRetrySuccessSummary {
+		return TraceRoleSummarySuccess
+	}
+	return TraceRoleSummaryFailed
+}
+
+func traceLogDisplayCost(log Log, summaryType int) (quota int, promptTokens int, completionTokens int) {
+	if summaryType == LogTypeRetrySuccessSummary {
+		return log.Quota, log.PromptTokens, log.CompletionTokens
+	}
+	return 0, 0, 0
+}
+
+func isFormalTraceRequestStep(log Log) bool {
+	switch log.Type {
+	case LogTypeConsume, LogTypeRetryConsume, LogTypeErrorIntercepted, LogTypeErrorClientVisible, LogTypeError:
+		return true
+	default:
+		return false
+	}
+}
+
+func buildTraceSummaryOther(steps []Log, terminal Log) string {
+	otherMap, _ := common.StrToMap(terminal.Other)
+	if otherMap == nil {
+		otherMap = map[string]interface{}{}
+	}
+
+	channelPath := make([]int, 0, len(steps))
+	lastFormalChannelId := 0
+	var startedAt int64
+	endedAt := terminal.CreatedAt
+	platformProbeQuota := 0
+	probeSuccessCount := 0
+	probeFailedCount := 0
+	interceptedCount := 0
+
+	for _, step := range steps {
+		if step.Id == 0 || isTraceSummaryLogType(step.Type) {
+			continue
+		}
+		if startedAt == 0 || (step.CreatedAt != 0 && step.CreatedAt < startedAt) {
+			startedAt = step.CreatedAt
+		}
+		if step.CreatedAt > endedAt {
+			endedAt = step.CreatedAt
+		}
+		if isFormalTraceRequestStep(step) && step.ChannelId != 0 {
+			if step.ChannelId != lastFormalChannelId {
+				channelPath = append(channelPath, step.ChannelId)
+				lastFormalChannelId = step.ChannelId
+			}
+		}
+		switch step.Type {
+		case LogTypeProbeSuccess:
+			probeSuccessCount++
+			platformProbeQuota += step.Quota
+		case LogTypeProbeFailed:
+			probeFailedCount++
+		case LogTypeErrorIntercepted:
+			interceptedCount++
+		}
+	}
+	if startedAt == 0 {
+		startedAt = terminal.CreatedAt
+	}
+
+	otherMap["summary"] = map[string]interface{}{
+		"terminal_log_id":       terminal.Id,
+		"terminal_trace_role":   terminal.TraceRole,
+		"terminal_type":         terminal.Type,
+		"step_count":            len(steps),
+		"channel_path":          channelPath,
+		"started_at":            startedAt,
+		"ended_at":              endedAt,
+		"duration_seconds":      endedAt - startedAt,
+		"user_quota":            terminal.Quota,
+		"prompt_tokens":         terminal.PromptTokens,
+		"completion_tokens":     terminal.CompletionTokens,
+		"platform_probe_quota":  platformProbeQuota,
+		"probe_success_count":   probeSuccessCount,
+		"probe_failed_count":    probeFailedCount,
+		"intercepted_log_count": interceptedCount,
+	}
+	return common.MapToJsonStr(otherMap)
+}
+
+func UpsertTraceSummary(traceId string) (*Log, error) {
+	if traceId == "" || LOG_DB == nil {
+		return nil, nil
+	}
+
+	var logs []Log
+	if err := LOG_DB.
+		Where("(trace_id = ? OR request_id = ?) AND type NOT IN ?", traceId, traceId, []int{LogTypeRetrySuccessSummary, LogTypeRetryFailedSummary}).
+		Order("CASE WHEN trace_seq > 0 THEN trace_seq ELSE 2147483647 END ASC, trace_sibling_seq ASC, id ASC").
+		Find(&logs).Error; err != nil {
+		return nil, err
+	}
+	if len(logs) == 0 {
+		return nil, nil
+	}
+
+	var terminal *Log
+	for i := range logs {
+		if betterTraceTerminal(logs[i], terminal) {
+			terminal = &logs[i]
+		}
+	}
+	if terminal == nil {
+		return nil, nil
+	}
+
+	hasChain := false
+	for _, step := range logs {
+		if step.Id == terminal.Id {
+			continue
+		}
+		if isTraceChildLogType(step.Type) || step.TraceSeq > 1 {
+			hasChain = true
+			break
+		}
+	}
+	if !hasChain && terminal.Type == LogTypeConsume {
+		return nil, nil
+	}
+
+	summaryType := traceSummaryTypeForTerminal(*terminal)
+	quota, promptTokens, completionTokens := traceLogDisplayCost(*terminal, summaryType)
+	summaryOther := buildTraceSummaryOther(logs, *terminal)
+
+	var summary Log
+	err := LOG_DB.Where("(trace_id = ? OR request_id = ?) AND type IN ?", traceId, traceId, []int{LogTypeRetrySuccessSummary, LogTypeRetryFailedSummary}).
+		Order("id DESC").
+		First(&summary).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		summary = Log{
+			UserId:           terminal.UserId,
+			Username:         terminal.Username,
+			CreatedAt:        common.GetTimestamp(),
+			Type:             summaryType,
+			Content:          terminal.Content,
+			TokenName:        terminal.TokenName,
+			ModelName:        terminal.ModelName,
+			Quota:            quota,
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			UseTime:          int(common.GetTimestamp() - logs[0].CreatedAt),
+			IsStream:         terminal.IsStream,
+			ChannelId:        terminal.ChannelId,
+			TokenId:          terminal.TokenId,
+			Group:            terminal.Group,
+			Ip:               terminal.Ip,
+			RequestId:        terminal.RequestId,
+			TraceId:          terminal.TraceId,
+			TraceRole:        traceSummaryRoleForType(summaryType),
+			TerminalLogId:    terminal.Id,
+			TraceVersion:     1,
+			Other:            summaryOther,
+		}
+		if summary.TraceId == "" {
+			summary.TraceId = traceId
+		}
+		if summary.RequestId == "" {
+			summary.RequestId = traceId
+		}
+		if err := LOG_DB.Create(&summary).Error; err != nil {
+			return nil, err
+		}
+		if err := LOG_DB.Model(&Log{}).Where("id = ?", summary.Id).Updates(map[string]interface{}{
+			"summary_log_id": summary.Id,
+		}).Error; err != nil {
+			return nil, err
+		}
+		summary.SummaryLogId = summary.Id
+	} else if err != nil {
+		return nil, err
+	} else {
+		updates := map[string]interface{}{
+			"type":              summaryType,
+			"trace_role":        traceSummaryRoleForType(summaryType),
+			"terminal_log_id":   terminal.Id,
+			"summary_log_id":    summary.Id,
+			"trace_version":     1,
+			"user_id":           terminal.UserId,
+			"username":          terminal.Username,
+			"token_name":        terminal.TokenName,
+			"model_name":        terminal.ModelName,
+			"quota":             quota,
+			"prompt_tokens":     promptTokens,
+			"completion_tokens": completionTokens,
+			"is_stream":         terminal.IsStream,
+			"channel_id":        terminal.ChannelId,
+			"token_id":          terminal.TokenId,
+			"group":             terminal.Group,
+			"ip":                terminal.Ip,
+			"content":           terminal.Content,
+			"other":             summaryOther,
+		}
+		if err := LOG_DB.Model(&summary).Updates(updates).Error; err != nil {
+			return nil, err
+		}
+		summary.Type = summaryType
+		summary.TraceRole = traceSummaryRoleForType(summaryType)
+		summary.TerminalLogId = terminal.Id
+		summary.SummaryLogId = summary.Id
+	}
+
+	if err := LOG_DB.Model(&Log{}).
+		Where("(trace_id = ? OR request_id = ?) AND type NOT IN ?", traceId, traceId, []int{LogTypeRetrySuccessSummary, LogTypeRetryFailedSummary}).
+		Updates(map[string]interface{}{
+			"summary_log_id": summary.Id,
+			"trace_version":  1,
+		}).Error; err != nil {
+		return &summary, err
+	}
+
+	return &summary, nil
+}
+
+func FinalizeTraceAfterLogCreated(log *Log) {
+	if log == nil || log.RequestId == "" || isTraceSummaryLogType(log.Type) {
+		return
+	}
+	traceId := log.TraceId
+	if traceId == "" {
+		traceId = log.RequestId
+	}
+	if isTraceTerminalLog(log) {
+		if _, err := UpsertTraceSummary(traceId); err != nil {
+			common.SysLog("failed to upsert trace summary: " + err.Error())
+		}
+		return
+	}
+
+	var summary Log
+	err := LOG_DB.Where("(trace_id = ? OR request_id = ?) AND type IN ?", traceId, traceId, []int{LogTypeRetrySuccessSummary, LogTypeRetryFailedSummary}).
+		Order("id DESC").
+		First(&summary).Error
+	if err == nil && summary.Id > 0 {
+		_ = LOG_DB.Model(log).Updates(map[string]interface{}{
+			"summary_log_id": summary.Id,
+			"trace_version":  1,
+		}).Error
+		if _, upsertErr := UpsertTraceSummary(traceId); upsertErr != nil {
+			common.SysLog("failed to refresh trace summary: " + upsertErr.Error())
+		}
+	}
 }
 
 func formatUserLogs(logs []*Log, startIdx int) {
@@ -312,7 +659,9 @@ func RecordErrorLogWithType(c *gin.Context, logType int, userId int, channelId i
 	err := LOG_DB.Create(log).Error
 	if err != nil {
 		logger.LogError(c, "failed to record log: "+err.Error())
+		return
 	}
+	FinalizeTraceAfterLogCreated(log)
 }
 
 type RecordConsumeLogParams struct {
@@ -346,10 +695,15 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		}
 	}
 	log := &Log{
-		UserId:           userId,
-		Username:         username,
-		CreatedAt:        common.GetTimestamp(),
-		Type:             LogTypeConsume,
+		UserId:    userId,
+		Username:  username,
+		CreatedAt: common.GetTimestamp(),
+		Type: func() int {
+			if hasExistingSFTTraceSteps(requestId) {
+				return LogTypeRetryConsume
+			}
+			return LogTypeConsume
+		}(),
 		Content:          params.Content,
 		PromptTokens:     params.PromptTokens,
 		CompletionTokens: params.CompletionTokens,
@@ -374,7 +728,9 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	err := LOG_DB.Create(log).Error
 	if err != nil {
 		logger.LogError(c, "failed to record log: "+err.Error())
+		return
 	}
+	FinalizeTraceAfterLogCreated(log)
 	if common.DataExportEnabled {
 		gopool.Go(func() {
 			LogQuotaData(userId, username, params.ModelName, params.Quota, common.GetTimestamp(), params.PromptTokens+params.CompletionTokens)
@@ -445,6 +801,9 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	}
 	if requestId != "" {
 		tx = tx.Where("logs.request_id = ?", requestId)
+	}
+	if logType == LogTypeUnknown {
+		tx = tx.Where("NOT (logs.summary_log_id > 0 AND logs.type NOT IN ?)", []int{LogTypeRetrySuccessSummary, LogTypeRetryFailedSummary})
 	}
 	if startTimestamp != 0 {
 		tx = tx.Where("logs.created_at >= ?", startTimestamp)
@@ -533,6 +892,9 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	if requestId != "" {
 		tx = tx.Where("logs.request_id = ?", requestId)
 	}
+	if logType == LogTypeUnknown {
+		tx = tx.Where("NOT (logs.summary_log_id > 0 AND logs.type NOT IN ?)", []int{LogTypeRetrySuccessSummary, LogTypeRetryFailedSummary})
+	}
 	if startTimestamp != 0 {
 		tx = tx.Where("logs.created_at >= ?", startTimestamp)
 	}
@@ -600,8 +962,13 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 		rpmTpmQuery = rpmTpmQuery.Where(logGroupCol+" = ?", group)
 	}
 
-	tx = tx.Where("type = ?", LogTypeConsume)
-	rpmTpmQuery = rpmTpmQuery.Where("type = ?", LogTypeConsume)
+	if logType != LogTypeUnknown {
+		tx = tx.Where("type = ?", logType)
+		rpmTpmQuery = rpmTpmQuery.Where("type = ?", logType)
+	} else {
+		tx = tx.Where("type IN ?", []int{LogTypeConsume, LogTypeRetrySuccessSummary})
+		rpmTpmQuery = rpmTpmQuery.Where("type IN ?", []int{LogTypeConsume, LogTypeRetrySuccessSummary})
+	}
 
 	// 只统计最近60秒的rpm和tpm
 	rpmTpmQuery = rpmTpmQuery.Where("created_at >= ?", time.Now().Add(-60*time.Second).Unix())
@@ -636,7 +1003,7 @@ func SumUsedToken(logType int, startTimestamp int64, endTimestamp int64, modelNa
 	if modelName != "" {
 		tx = tx.Where("model_name = ?", modelName)
 	}
-	tx.Where("type = ?", LogTypeConsume).Scan(&token)
+	tx.Where("type IN ?", []int{LogTypeConsume, LogTypeRetrySuccessSummary}).Scan(&token)
 	return token
 }
 

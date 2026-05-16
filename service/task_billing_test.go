@@ -11,13 +11,19 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/glebarez/sqlite"
+	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv("NACP_LIVE_TEST") == "1" {
+		os.Exit(runLiveTestMain(m))
+	}
+
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		panic("failed to open test db: " + err.Error())
@@ -49,6 +55,32 @@ func TestMain(m *testing.M) {
 	}
 
 	os.Exit(m.Run())
+}
+
+func runLiveTestMain(m *testing.M) int {
+	_ = godotenv.Load(".env", "../.env")
+	_ = os.Setenv("NODE_TYPE", "slave")
+	common.InitEnv()
+	common.IsMasterNode = false
+	common.RedisEnabled = false
+	common.MemoryCacheEnabled = false
+	ratio_setting.InitRatioSettings()
+
+	if err := model.InitDB(); err != nil {
+		panic("failed to init live db: " + err.Error())
+	}
+	model.InitOptionMap()
+	model.GetPricing()
+	if err := model.InitLogDB(); err != nil {
+		panic("failed to init live log db: " + err.Error())
+	}
+	initProbeHTTPClient()
+
+	code := m.Run()
+	if err := model.CloseDB(); err != nil {
+		common.SysLog("failed to close live test db: " + err.Error())
+	}
+	return code
 }
 
 // ---------------------------------------------------------------------------

@@ -22,8 +22,13 @@
 - [classic-plus-0.1.x -> classic-plus-0.2.0 升级说明](./release-classic-plus-0-2-0-upgrade-review.md)
 - [CAF classic-plus-0.2.0 本地 API 深度测试计划](./caf-classic-plus-0-2-0-local-api-plan.md)
 - [CAF classic-plus-0.2.0 本地 API 测试报告](./caf-classic-plus-0-2-0-local-api-report.md)
+- [CAF 本地隔离数据库 SFT API 测试报告](./caf-local-isolated-db-sft-api-report.md)
+- [CAF 本地代码 + 测试站数据库 SFT API 复测报告](./caf-local-online-db-sft-api-report.md)
 - [CAF classic-plus-0.2.0 深度测试计划](./caf-classic-plus-0-2-0-plan.md)
 - [CAF classic-plus-0.2.0 在线测试报告](./caf-classic-plus-0-2-0-online-test-report.md)
+- [API 驱动测试夹具规范](../L3#Standards/standards/06.quality-04.api-driven-test-fixtures.md)
+- [SFT 日志链路结构与 20/50 摘要排序说明](./sft-log-chain-structure-and-summary-ordering.md)
+- [SFT 物化摘要日志实施计划](./sft-materialized-summary-implementation-plan.md)
 
 ---
 
