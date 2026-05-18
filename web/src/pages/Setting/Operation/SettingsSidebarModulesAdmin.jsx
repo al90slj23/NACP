@@ -61,6 +61,8 @@ export default function SettingsSidebarModulesAdmin(props) {
     admin: {
       enabled: true,
       channel: true,
+      unit: true,
+      nacp_stats: true,
       models: true,
       deployment: true,
       redemption: true,
@@ -122,6 +124,8 @@ export default function SettingsSidebarModulesAdmin(props) {
       admin: {
         enabled: true,
         channel: true,
+        unit: true,
+        nacp_stats: true,
         models: true,
         deployment: true,
         redemption: true,
@@ -174,6 +178,9 @@ export default function SettingsSidebarModulesAdmin(props) {
     if (props.options && props.options.SidebarModulesAdmin) {
       try {
         const modules = JSON.parse(props.options.SidebarModulesAdmin);
+        if (modules?.admin && modules.admin.nacp_stats === undefined) {
+          modules.admin.nacp_stats = true;
+        }
         setSidebarModulesAdmin(modules);
       } catch (error) {
         // 使用默认配置
@@ -191,6 +198,8 @@ export default function SettingsSidebarModulesAdmin(props) {
           admin: {
             enabled: true,
             channel: true,
+            unit: true,
+            nacp_stats: true,
             models: true,
             deployment: true,
             redemption: true,
@@ -254,6 +263,16 @@ export default function SettingsSidebarModulesAdmin(props) {
       description: t('系统管理功能'),
       modules: [
         { key: 'channel', title: t('渠道管理'), description: t('API渠道配置') },
+        {
+          key: 'unit',
+          title: t('单位管理'),
+          description: t('资源承载平台管理'),
+        },
+        {
+          key: 'nacp_stats',
+          title: t('NACP统计'),
+          description: t('用户、模型、渠道和单位运营统计'),
+        },
         { key: 'models', title: t('模型管理'), description: t('AI模型配置') },
         {
           key: 'deployment',

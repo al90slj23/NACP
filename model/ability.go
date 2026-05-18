@@ -3,7 +3,6 @@ package model
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
@@ -179,8 +178,13 @@ func GetNextChannel(group string, model string, excluded map[int]bool) (*Channel
 }
 
 func (channel *Channel) AddAbilities(tx *gorm.DB) error {
-	models_ := strings.Split(channel.Models, ",")
-	groups_ := strings.Split(channel.Group, ",")
+	models_ := splitChannelCSV(channel.Models)
+	groups_ := channel.GetGroups()
+	useDB := DB
+	if tx != nil {
+		useDB = tx
+	}
+	groupConfigs := getExistingChannelGroupConfigMap(useDB, channel.Id)
 	abilitySet := make(map[string]struct{})
 	abilities := make([]Ability, 0, len(models_))
 	for _, model := range models_ {
@@ -195,20 +199,14 @@ func (channel *Channel) AddAbilities(tx *gorm.DB) error {
 				Model:     model,
 				ChannelId: channel.Id,
 				Enabled:   channel.Status == common.ChannelStatusEnabled,
-				Priority:  channel.Priority,
-				Weight:    uint(channel.GetWeight()),
 				Tag:       channel.Tag,
 			}
+			ability.Priority, ability.Weight = channel.abilityConfigForGroup(group, groupConfigs)
 			abilities = append(abilities, ability)
 		}
 	}
 	if len(abilities) == 0 {
 		return nil
-	}
-	// choose DB or provided tx
-	useDB := DB
-	if tx != nil {
-		useDB = tx
 	}
 	for _, chunk := range lo.Chunk(abilities, 50) {
 		err := useDB.Clauses(clause.OnConflict{DoNothing: true}).Create(&chunk).Error
@@ -241,6 +239,8 @@ func (channel *Channel) UpdateAbilities(tx *gorm.DB) error {
 		}()
 	}
 
+	existingGroupConfigs := getExistingChannelGroupConfigMap(tx, channel.Id)
+
 	// First delete all abilities of this channel
 	err := tx.Where("channel_id = ?", channel.Id).Delete(&Ability{}).Error
 	if err != nil {
@@ -251,8 +251,8 @@ func (channel *Channel) UpdateAbilities(tx *gorm.DB) error {
 	}
 
 	// Then add new abilities
-	models_ := strings.Split(channel.Models, ",")
-	groups_ := strings.Split(channel.Group, ",")
+	models_ := splitChannelCSV(channel.Models)
+	groups_ := channel.GetGroups()
 	abilitySet := make(map[string]struct{})
 	abilities := make([]Ability, 0, len(models_))
 	for _, model := range models_ {
@@ -262,13 +262,14 @@ func (channel *Channel) UpdateAbilities(tx *gorm.DB) error {
 				continue
 			}
 			abilitySet[key] = struct{}{}
+			priority, weight := channel.abilityConfigForGroup(group, existingGroupConfigs)
 			ability := Ability{
 				Group:     group,
 				Model:     model,
 				ChannelId: channel.Id,
 				Enabled:   channel.Status == common.ChannelStatusEnabled,
-				Priority:  channel.Priority,
-				Weight:    uint(channel.GetWeight()),
+				Priority:  priority,
+				Weight:    weight,
 				Tag:       channel.Tag,
 			}
 			abilities = append(abilities, ability)

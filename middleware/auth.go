@@ -33,6 +33,28 @@ func validUserInfo(username string, role int) bool {
 	return true
 }
 
+func abortSessionAuthError(c *gin.Context, statusCode int, payload gin.H, mask bool) {
+	if common.IsBlackboxEnabled() && mask {
+		AbortBlackboxNotFound(c)
+		return
+	}
+	if common.IsBlackboxEnabled() && statusCode >= http.StatusInternalServerError {
+		c.Status(statusCode)
+		c.Abort()
+		return
+	}
+	c.JSON(statusCode, payload)
+	c.Abort()
+}
+
+func abortTokenAuthError(c *gin.Context, statusCode int, message string, code ...types.ErrorCode) {
+	if common.IsBlackboxEnabled() && common.BlackboxMaskUnauthRelay {
+		AbortBlackboxNotFound(c)
+		return
+	}
+	abortWithOpenAiMessage(c, statusCode, message, code...)
+}
+
 func authHelper(c *gin.Context, minRole int) {
 	session := sessions.Default(c)
 	username := session.Get("username")
@@ -44,37 +66,34 @@ func authHelper(c *gin.Context, minRole int) {
 		// Check access token
 		accessToken := c.Request.Header.Get("Authorization")
 		if accessToken == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{
+			abortSessionAuthError(c, http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": common.TranslateMessage(c, i18n.MsgAuthNotLoggedIn),
-			})
-			c.Abort()
+			}, true)
 			return
 		}
 		user, authErr := model.ValidateAccessToken(accessToken)
 		if authErr != nil {
 			if errors.Is(authErr, model.ErrDatabase) {
 				common.SysLog("ValidateAccessToken database error: " + authErr.Error())
-				c.JSON(http.StatusInternalServerError, gin.H{
+				abortSessionAuthError(c, http.StatusInternalServerError, gin.H{
 					"success": false,
 					"message": common.TranslateMessage(c, i18n.MsgDatabaseError),
-				})
+				}, false)
 			} else {
-				c.JSON(http.StatusOK, gin.H{
+				abortSessionAuthError(c, http.StatusOK, gin.H{
 					"success": false,
 					"message": common.TranslateMessage(c, i18n.MsgAuthAccessTokenInvalid),
-				})
+				}, true)
 			}
-			c.Abort()
 			return
 		}
 		if user != nil && user.Username != "" {
 			if !validUserInfo(user.Username, user.Role) {
-				c.JSON(http.StatusOK, gin.H{
+				abortSessionAuthError(c, http.StatusOK, gin.H{
 					"success": false,
 					"message": common.TranslateMessage(c, i18n.MsgAuthUserInfoInvalid),
-				})
-				c.Abort()
+				}, true)
 				return
 			}
 			// Token is valid
@@ -84,68 +103,63 @@ func authHelper(c *gin.Context, minRole int) {
 			status = user.Status
 			useAccessToken = true
 		} else {
-			c.JSON(http.StatusOK, gin.H{
+			abortSessionAuthError(c, http.StatusOK, gin.H{
 				"success": false,
 				"message": common.TranslateMessage(c, i18n.MsgAuthAccessTokenInvalid),
-			})
-			c.Abort()
+			}, true)
 			return
 		}
 	}
 	// get header New-Api-User
 	apiUserIdStr := c.Request.Header.Get("New-Api-User")
 	if apiUserIdStr == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{
+		abortSessionAuthError(c, http.StatusUnauthorized, gin.H{
 			"success": false,
 			"message": common.TranslateMessage(c, i18n.MsgAuthUserIdNotProvided),
-		})
-		c.Abort()
+		}, true)
 		return
 	}
 	apiUserId, err := strconv.Atoi(apiUserIdStr)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
+		abortSessionAuthError(c, http.StatusUnauthorized, gin.H{
 			"success": false,
 			"message": common.TranslateMessage(c, i18n.MsgAuthUserIdFormatError),
-		})
-		c.Abort()
+		}, true)
 		return
 
 	}
 	if id != apiUserId {
-		c.JSON(http.StatusUnauthorized, gin.H{
+		abortSessionAuthError(c, http.StatusUnauthorized, gin.H{
 			"success": false,
 			"message": common.TranslateMessage(c, i18n.MsgAuthUserIdMismatch),
-		})
-		c.Abort()
+		}, true)
 		return
 	}
 	if status.(int) == common.UserStatusDisabled {
-		c.JSON(http.StatusOK, gin.H{
+		abortSessionAuthError(c, http.StatusOK, gin.H{
 			"success": false,
 			"message": common.TranslateMessage(c, i18n.MsgAuthUserBanned),
-		})
-		c.Abort()
+		}, true)
 		return
 	}
 	if role.(int) < minRole {
-		c.JSON(http.StatusOK, gin.H{
+		abortSessionAuthError(c, http.StatusOK, gin.H{
 			"success": false,
 			"message": common.TranslateMessage(c, i18n.MsgAuthInsufficientPrivilege),
-		})
-		c.Abort()
+		}, common.IsBlackboxStrict())
 		return
 	}
 	if !validUserInfo(username.(string), role.(int)) {
-		c.JSON(http.StatusOK, gin.H{
+		abortSessionAuthError(c, http.StatusOK, gin.H{
 			"success": false,
 			"message": common.TranslateMessage(c, i18n.MsgAuthUserInfoInvalid),
-		})
-		c.Abort()
+		}, true)
 		return
 	}
 	// 防止不同newapi版本冲突，导致数据不通用
-	c.Header("Auth-Version", "864b7076dbcd0a3c01b5520316720ebf")
+	if !(common.IsBlackboxEnabled() && common.BlackboxMaskHeaders) {
+		c.Header("Auth-Version", "864b7076dbcd0a3c01b5520316720ebf")
+	}
 	c.Set("username", username)
 	c.Set("role", role)
 	c.Set("id", id)
@@ -215,11 +229,10 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		key := c.Request.Header.Get("Authorization")
 		if key == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{
+			abortSessionAuthError(c, http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": common.TranslateMessage(c, i18n.MsgTokenNotProvided),
-			})
-			c.Abort()
+			}, true)
 			return
 		}
 		if strings.HasPrefix(key, "Bearer ") || strings.HasPrefix(key, "bearer ") {
@@ -232,37 +245,34 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 		token, err := model.GetTokenByKey(key, false)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(http.StatusUnauthorized, gin.H{
+				abortSessionAuthError(c, http.StatusUnauthorized, gin.H{
 					"success": false,
 					"message": common.TranslateMessage(c, i18n.MsgTokenInvalid),
-				})
+				}, true)
 			} else {
 				common.SysLog("TokenAuthReadOnly GetTokenByKey database error: " + err.Error())
-				c.JSON(http.StatusInternalServerError, gin.H{
+				abortSessionAuthError(c, http.StatusInternalServerError, gin.H{
 					"success": false,
 					"message": common.TranslateMessage(c, i18n.MsgDatabaseError),
-				})
+				}, false)
 			}
-			c.Abort()
 			return
 		}
 
 		userCache, err := model.GetUserCache(token.UserId)
 		if err != nil {
 			common.SysLog(fmt.Sprintf("TokenAuthReadOnly GetUserCache error for user %d: %v", token.UserId, err))
-			c.JSON(http.StatusInternalServerError, gin.H{
+			abortSessionAuthError(c, http.StatusInternalServerError, gin.H{
 				"success": false,
 				"message": common.TranslateMessage(c, i18n.MsgDatabaseError),
-			})
-			c.Abort()
+			}, false)
 			return
 		}
 		if userCache.Status != common.UserStatusEnabled {
-			c.JSON(http.StatusForbidden, gin.H{
+			abortSessionAuthError(c, http.StatusForbidden, gin.H{
 				"success": false,
 				"message": common.TranslateMessage(c, i18n.MsgAuthUserBanned),
-			})
-			c.Abort()
+			}, true)
 			return
 		}
 
@@ -339,10 +349,10 @@ func TokenAuth() func(c *gin.Context) {
 		if err != nil {
 			if errors.Is(err, model.ErrDatabase) {
 				common.SysLog("TokenAuth ValidateUserToken database error: " + err.Error())
-				abortWithOpenAiMessage(c, http.StatusInternalServerError,
+				abortTokenAuthError(c, http.StatusInternalServerError,
 					common.TranslateMessage(c, i18n.MsgDatabaseError))
 			} else {
-				abortWithOpenAiMessage(c, http.StatusUnauthorized,
+				abortTokenAuthError(c, http.StatusUnauthorized,
 					common.TranslateMessage(c, i18n.MsgTokenInvalid))
 			}
 			return
@@ -354,11 +364,11 @@ func TokenAuth() func(c *gin.Context) {
 			logger.LogDebug(c, "Token has IP restrictions, checking client IP %s", clientIp)
 			ip := net.ParseIP(clientIp)
 			if ip == nil {
-				abortWithOpenAiMessage(c, http.StatusForbidden, "无法解析客户端 IP 地址")
+				abortTokenAuthError(c, http.StatusForbidden, "无法解析客户端 IP 地址")
 				return
 			}
 			if common.IsIpInCIDRList(ip, allowIps) == false {
-				abortWithOpenAiMessage(c, http.StatusForbidden, "您的 IP 不在令牌允许访问的列表中", types.ErrorCodeAccessDenied)
+				abortTokenAuthError(c, http.StatusForbidden, "您的 IP 不在令牌允许访问的列表中", types.ErrorCodeAccessDenied)
 				return
 			}
 			logger.LogDebug(c, "Client IP %s passed the token IP restrictions check", clientIp)
@@ -367,13 +377,13 @@ func TokenAuth() func(c *gin.Context) {
 		userCache, err := model.GetUserCache(token.UserId)
 		if err != nil {
 			common.SysLog(fmt.Sprintf("TokenAuth GetUserCache error for user %d: %v", token.UserId, err))
-			abortWithOpenAiMessage(c, http.StatusInternalServerError,
+			abortTokenAuthError(c, http.StatusInternalServerError,
 				common.TranslateMessage(c, i18n.MsgDatabaseError))
 			return
 		}
 		userEnabled := userCache.Status == common.UserStatusEnabled
 		if !userEnabled {
-			abortWithOpenAiMessage(c, http.StatusForbidden, common.TranslateMessage(c, i18n.MsgAuthUserBanned))
+			abortTokenAuthError(c, http.StatusForbidden, common.TranslateMessage(c, i18n.MsgAuthUserBanned))
 			return
 		}
 
@@ -384,13 +394,13 @@ func TokenAuth() func(c *gin.Context) {
 		if tokenGroup != "" {
 			// check common.UserUsableGroups[userGroup]
 			if _, ok := service.GetUserUsableGroups(userGroup)[tokenGroup]; !ok {
-				abortWithOpenAiMessage(c, http.StatusForbidden, fmt.Sprintf("无权访问 %s 分组", tokenGroup))
+				abortTokenAuthError(c, http.StatusForbidden, fmt.Sprintf("无权访问 %s 分组", tokenGroup))
 				return
 			}
 			// check group in common.GroupRatio
 			if !ratio_setting.ContainsGroupRatio(tokenGroup) {
 				if tokenGroup != "auto" {
-					abortWithOpenAiMessage(c, http.StatusForbidden, fmt.Sprintf("分组 %s 已被弃用", tokenGroup))
+					abortTokenAuthError(c, http.StatusForbidden, fmt.Sprintf("分组 %s 已被弃用", tokenGroup))
 					return
 				}
 			}
@@ -430,8 +440,10 @@ func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) e
 		if model.IsAdmin(token.UserId) {
 			c.Set("specific_channel_id", parts[1])
 		} else {
-			c.Header("specific_channel_version", "701e3ae1dc3f7975556d354e0675168d004891c8")
-			abortWithOpenAiMessage(c, http.StatusForbidden, "普通用户不支持指定渠道")
+			if !(common.IsBlackboxEnabled() && common.BlackboxMaskHeaders) {
+				c.Header("specific_channel_version", "701e3ae1dc3f7975556d354e0675168d004891c8")
+			}
+			abortTokenAuthError(c, http.StatusForbidden, "普通用户不支持指定渠道")
 			return fmt.Errorf("普通用户不支持指定渠道")
 		}
 	}

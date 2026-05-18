@@ -574,7 +574,7 @@ export const getChannelsColumns = ({
     },
     {
       key: COLUMN_KEYS.PRIORITY,
-      title: t('优先级'),
+      title: t('默认优先级'),
       dataIndex: 'priority',
       render: (text, record, index) => {
         if (record.children === undefined) {
@@ -602,9 +602,9 @@ export const getChannelsColumns = ({
               keepFocus={true}
               onBlur={(e) => {
                 Modal.warning({
-                  title: t('修改子渠道优先级'),
+                  title: t('修改子渠道默认优先级'),
                   content:
-                    t('确定要修改所有子渠道优先级为 ') +
+                    t('确定要修改所有子渠道默认优先级为 ') +
                     e.target.value +
                     t(' 吗？'),
                   onOk: () => {
@@ -629,7 +629,7 @@ export const getChannelsColumns = ({
     },
     {
       key: COLUMN_KEYS.WEIGHT,
-      title: t('权重'),
+      title: t('默认权重'),
       dataIndex: 'weight',
       render: (text, record, index) => {
         if (record.children === undefined) {
@@ -657,9 +657,9 @@ export const getChannelsColumns = ({
               keepFocus={true}
               onBlur={(e) => {
                 Modal.warning({
-                  title: t('修改子渠道权重'),
+                  title: t('修改子渠道默认权重'),
                   content:
-                    t('确定要修改所有子渠道权重为 ') +
+                    t('确定要修改所有子渠道默认权重为 ') +
                     e.target.value +
                     t(' 吗？'),
                   onOk: () => {

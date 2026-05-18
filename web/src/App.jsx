@@ -32,6 +32,8 @@ import { StatusContext } from './context/Status';
 import PasswordResetForm from './components/auth/PasswordResetForm';
 import PasswordResetConfirm from './components/auth/PasswordResetConfirm';
 import Channel from './pages/Channel';
+import Unit from './pages/Unit';
+import NacpStats from './pages/NacpStats';
 import Token from './pages/Token';
 import Redemption from './pages/Redemption';
 import TopUp from './pages/TopUp';
@@ -147,6 +149,22 @@ function App() {
           element={
             <AdminRoute>
               <Channel />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path='/console/unit'
+          element={
+            <AdminRoute>
+              <Unit />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path='/console/nacp_stats'
+          element={
+            <AdminRoute>
+              <NacpStats />
             </AdminRoute>
           }
         />

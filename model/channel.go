@@ -44,6 +44,8 @@ type Channel struct {
 	AutoBan           *int    `json:"auto_ban" gorm:"default:1"`
 	OtherInfo         string  `json:"other_info"`
 	Tag               *string `json:"tag" gorm:"index"`
+	UnitID            int     `json:"unit_id" gorm:"default:0;index"`
+	UnitAccountID     int     `json:"unit_account_id" gorm:"default:0;index"`
 	Setting           *string `json:"setting" gorm:"type:text"` // 渠道额外设置
 	ParamOverride     *string `json:"param_override" gorm:"type:text"`
 	HeaderOverride    *string `json:"header_override" gorm:"type:text"`
@@ -60,7 +62,15 @@ type Channel struct {
 	HealthSuccessCount int    `json:"health_success_count" gorm:"default:0"`
 
 	// cache info
-	Keys []string `json:"-" gorm:"-"`
+	Keys         []string             `json:"-" gorm:"-"`
+	GroupConfigs []ChannelGroupConfig `json:"group_configs,omitempty" gorm:"-"`
+}
+
+type ChannelGroupConfig struct {
+	ChannelId int    `json:"channel_id,omitempty" gorm:"primaryKey;autoIncrement:false;index"`
+	Group     string `json:"group" gorm:"column:group;type:varchar(64);primaryKey;autoIncrement:false"`
+	Priority  *int64 `json:"priority" gorm:"bigint;default:0"`
+	Weight    *uint  `json:"weight" gorm:"default:0"`
 }
 
 type ChannelInfo struct {
@@ -207,14 +217,7 @@ func (channel *Channel) GetModels() []string {
 }
 
 func (channel *Channel) GetGroups() []string {
-	if channel.Group == "" {
-		return []string{}
-	}
-	groups := strings.Split(strings.Trim(channel.Group, ","), ",")
-	for i, group := range groups {
-		groups[i] = strings.TrimSpace(group)
-	}
-	return groups
+	return splitChannelCSV(channel.Group)
 }
 
 func (channel *Channel) GetOtherInfo() map[string]interface{} {
@@ -358,6 +361,9 @@ func GetChannelById(id int, selectAll bool) (*Channel, error) {
 	if channel == nil {
 		return nil, errors.New("channel not found")
 	}
+	if err := channel.LoadGroupConfigs(); err != nil {
+		return nil, err
+	}
 	return channel, nil
 }
 
@@ -381,6 +387,10 @@ func BatchInsertChannels(channels []Channel) error {
 			return err
 		}
 		for _, channel_ := range chunk {
+			if err := channel_.SaveGroupConfigs(tx); err != nil {
+				tx.Rollback()
+				return err
+			}
 			if err := channel_.AddAbilities(tx); err != nil {
 				tx.Rollback()
 				return err
@@ -408,6 +418,10 @@ func BatchDeleteChannels(ids []int) error {
 			tx.Rollback()
 			return err
 		}
+		if err := tx.Where("channel_id in (?)", chunk).Delete(&ChannelGroupConfig{}).Error; err != nil {
+			tx.Rollback()
+			return err
+		}
 	}
 	return tx.Commit().Error
 }
@@ -424,6 +438,262 @@ func (channel *Channel) GetWeight() int {
 		return 0
 	}
 	return int(*channel.Weight)
+}
+
+func splitChannelCSV(value string) []string {
+	if value == "" {
+		return []string{}
+	}
+	parts := strings.Split(strings.Trim(value, ","), ",")
+	result := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		result = append(result, item)
+	}
+	return result
+}
+
+func (channel *Channel) requestGroupConfigMap() map[string]ChannelGroupConfig {
+	configs := make(map[string]ChannelGroupConfig, len(channel.GroupConfigs))
+	for _, config := range channel.GroupConfigs {
+		group := strings.TrimSpace(config.Group)
+		if group == "" {
+			continue
+		}
+		config.Group = group
+		configs[group] = config
+	}
+	return configs
+}
+
+func getPersistedChannelGroupConfigMap(tx *gorm.DB, channelId int) (map[string]ChannelGroupConfig, error) {
+	if tx == nil {
+		tx = DB
+	}
+	var persisted []ChannelGroupConfig
+	if err := tx.Where("channel_id = ?", channelId).
+		Order(commonGroupCol + " ASC").
+		Find(&persisted).Error; err != nil {
+		return nil, err
+	}
+	configs := make(map[string]ChannelGroupConfig, len(persisted))
+	for _, config := range persisted {
+		group := strings.TrimSpace(config.Group)
+		if group == "" {
+			continue
+		}
+		config.Group = group
+		configs[group] = config
+	}
+	return configs, nil
+}
+
+func GetChannelGroupConfigs(channelId int) ([]ChannelGroupConfig, error) {
+	var persisted []ChannelGroupConfig
+	if err := DB.Where("channel_id = ?", channelId).
+		Order(commonGroupCol + " ASC").
+		Find(&persisted).Error; err != nil {
+		return nil, err
+	}
+	if len(persisted) > 0 {
+		configs := make([]ChannelGroupConfig, 0, len(persisted))
+		seen := make(map[string]struct{}, len(persisted))
+		for _, config := range persisted {
+			group := strings.TrimSpace(config.Group)
+			if group == "" {
+				continue
+			}
+			if _, ok := seen[group]; ok {
+				continue
+			}
+			seen[group] = struct{}{}
+			config.Group = group
+			configs = append(configs, config)
+		}
+		return configs, nil
+	}
+
+	var abilities []Ability
+	if err := DB.Where("channel_id = ?", channelId).
+		Order(commonGroupCol + " ASC, model ASC").
+		Find(&abilities).Error; err != nil {
+		return nil, err
+	}
+	configMap := make(map[string]ChannelGroupConfig)
+	order := make([]string, 0)
+	for _, ability := range abilities {
+		group := strings.TrimSpace(ability.Group)
+		if group == "" {
+			continue
+		}
+		if _, ok := configMap[group]; ok {
+			continue
+		}
+		weight := ability.Weight
+		configMap[group] = ChannelGroupConfig{
+			Group:    group,
+			Priority: ability.Priority,
+			Weight:   &weight,
+		}
+		order = append(order, group)
+	}
+	configs := make([]ChannelGroupConfig, 0, len(order))
+	for _, group := range order {
+		configs = append(configs, configMap[group])
+	}
+	return configs, nil
+}
+
+func (channel *Channel) SaveGroupConfigs(tx *gorm.DB) error {
+	if channel.GroupConfigs == nil {
+		return nil
+	}
+	if tx == nil {
+		tx = DB
+	}
+	if err := tx.Where("channel_id = ?", channel.Id).Delete(&ChannelGroupConfig{}).Error; err != nil {
+		return err
+	}
+
+	groups := channel.GetGroups()
+	if len(groups) == 0 {
+		return nil
+	}
+
+	configs := make([]ChannelGroupConfig, 0, len(groups))
+	for _, group := range groups {
+		priority, weight := channel.abilityConfigForGroup(group, nil)
+		weightCopy := weight
+		configs = append(configs, ChannelGroupConfig{
+			ChannelId: channel.Id,
+			Group:     group,
+			Priority:  priority,
+			Weight:    &weightCopy,
+		})
+	}
+	return tx.Create(&configs).Error
+}
+
+func (channel *Channel) SyncGroupConfigsWithDefaults(tx *gorm.DB) error {
+	if tx == nil {
+		tx = DB
+	}
+	persisted, err := getPersistedChannelGroupConfigMap(tx, channel.Id)
+	if err != nil {
+		return err
+	}
+	if err := tx.Where("channel_id = ?", channel.Id).Delete(&ChannelGroupConfig{}).Error; err != nil {
+		return err
+	}
+
+	groups := channel.GetGroups()
+	if len(groups) == 0 {
+		return nil
+	}
+
+	configs := make([]ChannelGroupConfig, 0, len(groups))
+	for _, group := range groups {
+		if config, ok := persisted[group]; ok {
+			config.ChannelId = channel.Id
+			config.Group = group
+			configs = append(configs, config)
+			continue
+		}
+		weight := uint(channel.GetWeight())
+		configs = append(configs, ChannelGroupConfig{
+			ChannelId: channel.Id,
+			Group:     group,
+			Priority:  channel.Priority,
+			Weight:    &weight,
+		})
+	}
+	return tx.Create(&configs).Error
+}
+
+func (channel *Channel) LoadGroupConfigs() error {
+	configs, err := GetChannelGroupConfigs(channel.Id)
+	if err != nil {
+		return err
+	}
+	if len(configs) == 0 {
+		for _, group := range channel.GetGroups() {
+			weight := uint(channel.GetWeight())
+			configs = append(configs, ChannelGroupConfig{
+				Group:    group,
+				Priority: channel.Priority,
+				Weight:   &weight,
+			})
+		}
+	}
+	channel.GroupConfigs = configs
+	return nil
+}
+
+func (channel *Channel) abilityConfigForGroup(group string, fallback map[string]ChannelGroupConfig) (*int64, uint) {
+	if config, ok := channel.requestGroupConfigMap()[group]; ok {
+		priority := channel.Priority
+		if config.Priority != nil {
+			priority = config.Priority
+		}
+		weight := uint(channel.GetWeight())
+		if config.Weight != nil {
+			weight = *config.Weight
+		}
+		return priority, weight
+	}
+	if config, ok := fallback[group]; ok {
+		priority := channel.Priority
+		if config.Priority != nil {
+			priority = config.Priority
+		}
+		weight := uint(channel.GetWeight())
+		if config.Weight != nil {
+			weight = *config.Weight
+		}
+		return priority, weight
+	}
+	return channel.Priority, uint(channel.GetWeight())
+}
+
+func getExistingChannelGroupConfigMap(tx *gorm.DB, channelId int) map[string]ChannelGroupConfig {
+	if tx == nil {
+		tx = DB
+	}
+	if configs, err := getPersistedChannelGroupConfigMap(tx, channelId); err == nil && len(configs) > 0 {
+		return configs
+	}
+
+	var abilities []Ability
+	if err := tx.Where("channel_id = ?", channelId).
+		Order(commonGroupCol + " ASC, model ASC").
+		Find(&abilities).Error; err != nil {
+		return nil
+	}
+	configs := make(map[string]ChannelGroupConfig)
+	for _, ability := range abilities {
+		group := strings.TrimSpace(ability.Group)
+		if group == "" {
+			continue
+		}
+		if _, ok := configs[group]; ok {
+			continue
+		}
+		weight := ability.Weight
+		configs[group] = ChannelGroupConfig{
+			Group:    group,
+			Priority: ability.Priority,
+			Weight:   &weight,
+		}
+	}
+	return configs
 }
 
 func (channel *Channel) GetBaseURL() string {
@@ -452,16 +722,30 @@ func (channel *Channel) GetStatusCodeMapping() string {
 }
 
 func (channel *Channel) Insert() error {
-	var err error
-	err = DB.Create(channel).Error
-	if err != nil {
+	tx := DB.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	if err := tx.Create(channel).Error; err != nil {
+		tx.Rollback()
 		return err
 	}
-	err = channel.AddAbilities(nil)
-	return err
+	if err := channel.SaveGroupConfigs(tx); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := channel.AddAbilities(tx); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit().Error
 }
 
 func (channel *Channel) Update() error {
+	requestGroupConfigs := channel.GroupConfigs
+	requestHasGroupConfigs := requestGroupConfigs != nil
+	shouldSyncDefaultGroupConfigs := !requestHasGroupConfigs && (channel.Priority != nil || channel.Weight != nil || channel.Group != "")
+
 	// If this is a multi-key channel, recalculate MultiKeySize based on the current key list to avoid inconsistency after editing keys
 	if channel.ChannelInfo.IsMultiKey {
 		var keyStr string
@@ -500,14 +784,37 @@ func (channel *Channel) Update() error {
 			}
 		}
 	}
-	var err error
-	err = DB.Model(channel).Updates(channel).Error
+	tx := DB.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	err := tx.Model(channel).Updates(channel).Error
 	if err != nil {
+		tx.Rollback()
 		return err
 	}
-	DB.Model(channel).First(channel, "id = ?", channel.Id)
-	err = channel.UpdateAbilities(nil)
-	return err
+	if err = tx.Model(channel).First(channel, "id = ?", channel.Id).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	if requestHasGroupConfigs {
+		channel.GroupConfigs = requestGroupConfigs
+		if err = channel.SaveGroupConfigs(tx); err != nil {
+			tx.Rollback()
+			return err
+		}
+	} else if shouldSyncDefaultGroupConfigs {
+		if err = channel.SyncGroupConfigsWithDefaults(tx); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	err = channel.UpdateAbilities(tx)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit().Error
 }
 
 func (channel *Channel) UpdateResponseTime(responseTime int64) {
@@ -537,6 +844,10 @@ func (channel *Channel) Delete() error {
 		return err
 	}
 	err = channel.DeleteAbilities()
+	if err != nil {
+		return err
+	}
+	err = DB.Where("channel_id = ?", channel.Id).Delete(&ChannelGroupConfig{}).Error
 	return err
 }
 
@@ -705,29 +1016,36 @@ func DisableChannelByTag(tag string) error {
 
 func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *string, group *string, priority *int64, weight *uint, paramOverride *string, headerOverride *string) error {
 	updateData := Channel{}
-	shouldReCreateAbilities := false
+	shouldRebuildAbilities := false
+	shouldSyncGroupConfigs := false
 	updatedTag := tag
 	// 如果 newTag 不为空且不等于 tag，则更新 tag
 	if newTag != nil && *newTag != tag {
 		updateData.Tag = newTag
 		updatedTag = *newTag
+		shouldRebuildAbilities = true
 	}
 	if modelMapping != nil && *modelMapping != "" {
 		updateData.ModelMapping = modelMapping
 	}
 	if models != nil && *models != "" {
-		shouldReCreateAbilities = true
+		shouldRebuildAbilities = true
 		updateData.Models = *models
 	}
 	if group != nil && *group != "" {
-		shouldReCreateAbilities = true
+		shouldRebuildAbilities = true
+		shouldSyncGroupConfigs = true
 		updateData.Group = *group
 	}
 	if priority != nil {
 		updateData.Priority = priority
+		shouldRebuildAbilities = true
+		shouldSyncGroupConfigs = true
 	}
 	if weight != nil {
 		updateData.Weight = weight
+		shouldRebuildAbilities = true
+		shouldSyncGroupConfigs = true
 	}
 	if paramOverride != nil {
 		updateData.ParamOverride = paramOverride
@@ -736,27 +1054,35 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 		updateData.HeaderOverride = headerOverride
 	}
 
-	err := DB.Model(&Channel{}).Where("tag = ?", tag).Updates(updateData).Error
+	tx := DB.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	err := tx.Model(&Channel{}).Where("tag = ?", tag).Updates(updateData).Error
 	if err != nil {
+		tx.Rollback()
 		return err
 	}
-	if shouldReCreateAbilities {
-		channels, err := GetChannelsByTag(updatedTag, false, false)
-		if err == nil {
-			for _, channel := range channels {
-				err = channel.UpdateAbilities(nil)
-				if err != nil {
-					common.SysLog(fmt.Sprintf("failed to update abilities: channel_id=%d, tag=%s, error=%v", channel.Id, channel.GetTag(), err))
-				}
-			}
-		}
-	} else {
-		err := UpdateAbilityByTag(tag, newTag, priority, weight)
-		if err != nil {
+	if shouldRebuildAbilities {
+		var channels []*Channel
+		if err = tx.Where("tag = ?", updatedTag).Find(&channels).Error; err != nil {
+			tx.Rollback()
 			return err
 		}
+		for _, channel := range channels {
+			if shouldSyncGroupConfigs {
+				if err = channel.SyncGroupConfigsWithDefaults(tx); err != nil {
+					tx.Rollback()
+					return err
+				}
+			}
+			if err = channel.UpdateAbilities(tx); err != nil {
+				tx.Rollback()
+				return err
+			}
+		}
 	}
-	return nil
+	return tx.Commit().Error
 }
 
 func UpdateChannelUsedQuota(id int, quota int) {

@@ -13,6 +13,10 @@ import (
 // SystemPerformanceCheck 检查系统性能中间件
 func SystemPerformanceCheck() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if common.IsBlackboxEnabled() && common.BlackboxMaskUnauthRelay && !HasBrowserSession(c) && !hasRelayAuthHint(c) {
+			AbortBlackboxNotFound(c)
+			return
+		}
 		// 仅检查 Relay 接口 (/v1, /v1beta 等)
 		// 这里简单判断路径前缀，可以根据实际路由调整
 		path := c.Request.URL.Path

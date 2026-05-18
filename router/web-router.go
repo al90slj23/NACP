@@ -17,11 +17,48 @@ func SetWebRouter(router *gin.Engine, buildFS embed.FS, indexPage []byte) {
 	router.Use(gzip.Gzip(gzip.DefaultCompression))
 	router.Use(middleware.GlobalWebRateLimit())
 	router.Use(middleware.Cache())
+	if common.IsBlackboxEnabled() {
+		setBlackboxWebRouter(router, buildFS, indexPage)
+		return
+	}
 	router.Use(static.Serve("/", common.EmbedFolder(buildFS, "web/dist")))
 	router.NoRoute(func(c *gin.Context) {
 		c.Set(middleware.RouteTagKey, "web")
 		if strings.HasPrefix(c.Request.RequestURI, "/v1") || strings.HasPrefix(c.Request.RequestURI, "/api") || strings.HasPrefix(c.Request.RequestURI, "/assets") {
 			controller.RelayNotFound(c)
+			return
+		}
+		c.Header("Cache-Control", "no-cache")
+		c.Data(http.StatusOK, "text/html; charset=utf-8", indexPage)
+	})
+}
+
+func setBlackboxWebRouter(router *gin.Engine, buildFS embed.FS, indexPage []byte) {
+	distFS := common.EmbedFolder(buildFS, "web/dist")
+	router.GET(common.BlackboxLoginPath, controller.BlackboxLoginPage)
+	router.GET("/assets/*filepath", middleware.BlackboxSessionRequired(), func(c *gin.Context) {
+		c.FileFromFS("/assets"+c.Param("filepath"), distFS)
+	})
+	for _, assetPath := range []string{"/logo.png", "/favicon.ico", "/manifest.json"} {
+		path := assetPath
+		router.GET(path, middleware.BlackboxSessionRequired(), func(c *gin.Context) {
+			c.FileFromFS(path, distFS)
+		})
+	}
+	router.NoRoute(func(c *gin.Context) {
+		c.Set(middleware.RouteTagKey, "web")
+		if strings.HasPrefix(c.Request.RequestURI, "/v1") ||
+			strings.HasPrefix(c.Request.RequestURI, "/v1beta") ||
+			strings.HasPrefix(c.Request.RequestURI, "/api") ||
+			strings.HasPrefix(c.Request.RequestURI, "/mj") ||
+			strings.HasPrefix(c.Request.RequestURI, "/suno") ||
+			strings.HasPrefix(c.Request.RequestURI, "/pg") ||
+			strings.HasPrefix(c.Request.RequestURI, "/dashboard") {
+			middleware.AbortBlackboxNotFound(c)
+			return
+		}
+		if !middleware.HasBrowserSession(c) {
+			middleware.AbortBlackboxNotFound(c)
 			return
 		}
 		c.Header("Cache-Control", "no-cache")

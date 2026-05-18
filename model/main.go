@@ -271,6 +271,11 @@ func migrateDB() error {
 
 	err := DB.AutoMigrate(
 		&Channel{},
+		&ChannelGroupConfig{},
+		&Unit{},
+		&UnitAccount{},
+		&UnitAccountMonitor{},
+		&UnitAccountMonitorSnapshot{},
 		&Token{},
 		&User{},
 		&PasskeyCredential{},
@@ -319,6 +324,11 @@ func migrateDBFast() error {
 		name  string
 	}{
 		{&Channel{}, "Channel"},
+		{&ChannelGroupConfig{}, "ChannelGroupConfig"},
+		{&Unit{}, "Unit"},
+		{&UnitAccount{}, "UnitAccount"},
+		{&UnitAccountMonitor{}, "UnitAccountMonitor"},
+		{&UnitAccountMonitorSnapshot{}, "UnitAccountMonitorSnapshot"},
 		{&Token{}, "Token"},
 		{&User{}, "User"},
 		{&PasskeyCredential{}, "PasskeyCredential"},

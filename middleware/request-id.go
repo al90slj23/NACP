@@ -24,7 +24,9 @@ func RequestId() func(c *gin.Context) {
 		c.Set(common.RequestIdKey, id)
 		ctx := context.WithValue(c.Request.Context(), common.RequestIdKey, id)
 		c.Request = c.Request.WithContext(ctx)
-		c.Header(common.RequestIdKey, id)
+		if !(common.IsBlackboxEnabled() && common.BlackboxMaskHeaders) {
+			c.Header(common.RequestIdKey, id)
+		}
 		c.Next()
 	}
 }

@@ -23,6 +23,11 @@ func SetRouter(router *gin.Engine, buildFS embed.FS, indexPage []byte) {
 		frontendBaseUrl = ""
 		common.SysLog("FRONTEND_BASE_URL is ignored on master node")
 	}
+	if common.IsBlackboxEnabled() {
+		SetWebRouter(router, buildFS, indexPage)
+		router.NoMethod(middleware.AbortBlackboxNotFound)
+		return
+	}
 	if frontendBaseUrl == "" {
 		SetWebRouter(router, buildFS, indexPage)
 	} else {

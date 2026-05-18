@@ -29,6 +29,13 @@
 - [API 驱动测试夹具规范](../L3#Standards/standards/06.quality-04.api-driven-test-fixtures.md)
 - [SFT 日志链路结构与 20/50 摘要排序说明](./sft-log-chain-structure-and-summary-ordering.md)
 - [SFT 物化摘要日志实施计划](./sft-materialized-summary-implementation-plan.md)
+- [NACP 运营监控大屏参考源码研读](./nacp-ops-monitor-reference-study.md)
+- [NACP 单位管理与 NACP统计整合说明](./nacp-unit-management-and-stats-dashboard.md)
+- [NACP统计主线阶段总结与续接计划](./nacp-stats-mainline-next-plan.md)
+- [NACP 日志 IP 记录与可见性策略](./nacp-log-ip-recording-visibility-policy.md)
+- [NACP 渠道分组调度配置说明](./nacp-channel-group-scheduling-policy.md)
+- [NACP B2B 黑盒部署加固清单](./nacp-blackbox-deployment-hardening.md)
+- [单位平台适配器规范](../L3#Standards/standards/01.arch-03.unit-platform-adapter.md)
 
 ---
 
@@ -41,4 +48,4 @@
 
 ---
 
-**最后更新**：2026-05-16
+**最后更新**：2026-05-19

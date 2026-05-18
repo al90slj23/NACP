@@ -40,6 +40,22 @@ func TestStatus(c *gin.Context) {
 }
 
 func GetStatus(c *gin.Context) {
+	if common.IsBlackboxEnabled() && !middleware.HasBrowserSession(c) {
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "",
+			"data": gin.H{
+				"password_login":         common.PasswordLoginEnabled,
+				"turnstile_check":        common.TurnstileCheckEnabled,
+				"turnstile_site_key":     common.TurnstileSiteKey,
+				"setup":                  constant.Setup,
+				"self_use_mode_enabled":  true,
+				"user_agreement_enabled": false,
+				"privacy_policy_enabled": false,
+			},
+		})
+		return
+	}
 
 	cs := console_setting.GetConsoleSetting()
 	common.OptionMapRWMutex.RLock()

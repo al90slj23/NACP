@@ -33,6 +33,8 @@ import { Nav, Divider, Button } from '@douyinfe/semi-ui';
 const routerMap = {
   home: '/',
   channel: '/console/channel',
+  unit: '/console/unit',
+  nacp_stats: '/console/nacp_stats',
   token: '/console/token',
   redemption: '/console/redemption',
   topup: '/console/topup',
@@ -152,6 +154,18 @@ const SiderBar = ({ onNavigate = () => {} }) => {
         text: t('渠道管理'),
         itemKey: 'channel',
         to: '/channel',
+        className: isAdmin() ? '' : 'tableHiddle',
+      },
+      {
+        text: t('单位管理'),
+        itemKey: 'unit',
+        to: '/unit',
+        className: isAdmin() ? '' : 'tableHiddle',
+      },
+      {
+        text: t('NACP统计'),
+        itemKey: 'nacp_stats',
+        to: '/nacp_stats',
         className: isAdmin() ? '' : 'tableHiddle',
       },
       {
@@ -521,7 +535,6 @@ const SiderBar = ({ onNavigate = () => {} }) => {
               />
             }
             onClick={toggleCollapsed}
-            icononly={collapsed}
             style={
               collapsed
                 ? { width: 36, height: 24, padding: 0 }

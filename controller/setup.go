@@ -5,6 +5,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
@@ -25,6 +26,10 @@ type SetupRequest struct {
 }
 
 func GetSetup(c *gin.Context) {
+	if common.IsBlackboxEnabled() && constant.Setup && !middleware.HasBrowserSession(c) {
+		middleware.AbortBlackboxNotFound(c)
+		return
+	}
 	setup := Setup{
 		Status: constant.Setup,
 	}
@@ -54,6 +59,10 @@ func GetSetup(c *gin.Context) {
 func PostSetup(c *gin.Context) {
 	// Check if setup is already completed
 	if constant.Setup {
+		if common.IsBlackboxEnabled() && !middleware.HasBrowserSession(c) {
+			middleware.AbortBlackboxNotFound(c)
+			return
+		}
 		c.JSON(200, gin.H{
 			"success": false,
 			"message": "系统已经初始化完成",

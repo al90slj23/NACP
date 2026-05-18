@@ -68,6 +68,35 @@ func clearChannelInfo(channel *model.Channel) {
 	}
 }
 
+func normalizeChannelUnitLink(channel *model.Channel) error {
+	if channel == nil {
+		return fmt.Errorf("渠道参数错误")
+	}
+	if channel.UnitID < 0 || channel.UnitAccountID < 0 {
+		return fmt.Errorf("所属单位或账号参数错误")
+	}
+	if channel.UnitAccountID > 0 {
+		account, err := model.GetUnitAccountById(channel.UnitAccountID)
+		if err != nil {
+			return fmt.Errorf("所属账号不存在")
+		}
+		if channel.UnitID > 0 && account.UnitID != channel.UnitID {
+			return fmt.Errorf("所属账号不属于所选单位")
+		}
+		channel.UnitID = account.UnitID
+	}
+	if channel.UnitID > 0 {
+		var count int64
+		if err := model.DB.Model(&model.Unit{}).Where("id = ?", channel.UnitID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return fmt.Errorf("所属单位不存在")
+		}
+	}
+	return nil
+}
+
 func GetAllChannels(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 	channelData := make([]*model.Channel, 0)
@@ -434,6 +463,10 @@ func validateTwoFactorAuth(twoFA *model.TwoFA, code string) bool {
 
 // validateChannel 通用的渠道校验函数
 func validateChannel(channel *model.Channel, isAdd bool) error {
+	if channel == nil {
+		return fmt.Errorf("channel cannot be empty")
+	}
+
 	// 校验 channel settings
 	if err := channel.ValidateSettings(); err != nil {
 		return fmt.Errorf("渠道额外设置[channel setting] 格式错误：%s", err.Error())
@@ -441,7 +474,7 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 
 	// 如果是添加操作，检查 channel 和 key 是否为空
 	if isAdd {
-		if channel == nil || channel.Key == "" {
+		if channel.Key == "" {
 			return fmt.Errorf("channel cannot be empty")
 		}
 
@@ -573,6 +606,13 @@ func AddChannel(c *gin.Context) {
 
 	// 使用统一的校验函数
 	if err := validateChannel(addChannelRequest.Channel, true); err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+	if err := normalizeChannelUnitLink(addChannelRequest.Channel); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": err.Error(),
@@ -849,6 +889,13 @@ func UpdateChannel(c *gin.Context) {
 
 	// 使用统一的校验函数
 	if err := validateChannel(&channel.Channel, false); err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+	if err := normalizeChannelUnitLink(&channel.Channel); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": err.Error(),

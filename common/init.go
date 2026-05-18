@@ -83,6 +83,16 @@ func InitEnv() {
 	MemoryCacheEnabled = os.Getenv("MEMORY_CACHE_ENABLED") == "true"
 	IsMasterNode = os.Getenv("NODE_TYPE") != "slave"
 	NodeName = os.Getenv("NODE_NAME")
+	SecurityProfile = strings.ToLower(strings.TrimSpace(GetEnvOrDefaultString("NACP_SECURITY_PROFILE", SecurityProfileNormal)))
+	if SecurityProfile != SecurityProfileNormal && SecurityProfile != SecurityProfileBlackbox && SecurityProfile != SecurityProfileStrict {
+		SysLog("invalid NACP_SECURITY_PROFILE, fallback to normal")
+		SecurityProfile = SecurityProfileNormal
+	}
+	BlackboxLoginPath = NormalizeBlackboxLoginPath(GetEnvOrDefaultString("NACP_BLACKBOX_LOGIN_PATH", BlackboxLoginPath))
+	BlackboxMaskHeaders = GetEnvOrDefaultBool("NACP_BLACKBOX_MASK_HEADERS", true)
+	BlackboxMaskUnauthRelay = GetEnvOrDefaultBool("NACP_BLACKBOX_MASK_UNAUTH_RELAY", true)
+	BlackboxPublicRegister = GetEnvOrDefaultBool("NACP_BLACKBOX_PUBLIC_REGISTER", false)
+	BlackboxPublicOAuth = GetEnvOrDefaultBool("NACP_BLACKBOX_PUBLIC_OAUTH", false)
 	TLSInsecureSkipVerify = GetEnvOrDefaultBool("TLS_INSECURE_SKIP_VERIFY", false)
 	if TLSInsecureSkipVerify {
 		if tr, ok := http.DefaultTransport.(*http.Transport); ok && tr != nil {

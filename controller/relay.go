@@ -592,6 +592,10 @@ func RelayMidjourney(c *gin.Context) {
 }
 
 func RelayNotImplemented(c *gin.Context) {
+	if common.IsBlackboxEnabled() && common.BlackboxMaskUnauthRelay {
+		middleware.AbortBlackboxNotFound(c)
+		return
+	}
 	err := types.OpenAIError{
 		Message: "API not implemented",
 		Type:    "new_api_error",
@@ -604,6 +608,10 @@ func RelayNotImplemented(c *gin.Context) {
 }
 
 func RelayNotFound(c *gin.Context) {
+	if common.IsBlackboxEnabled() && common.BlackboxMaskUnauthRelay {
+		middleware.AbortBlackboxNotFound(c)
+		return
+	}
 	err := types.OpenAIError{
 		Message: fmt.Sprintf("Invalid URL (%s %s)", c.Request.Method, c.Request.URL.Path),
 		Type:    "invalid_request_error",

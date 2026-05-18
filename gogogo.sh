@@ -1,4 +1,7 @@
 #!/bin/bash
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
 # ─────────────────────────────────────────────────────────────────────────────
 # NACP gogogo.sh — 统一入口脚本
 # 用法: ./gogogo.sh [选项]
@@ -9,6 +12,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 set +e  # Don't exit on error — we handle errors explicitly
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─── 配置 ─────────────────────────────────────────────────────────────────────
 IMAGE="ghcr.io/al90slj23/nacp:main"
@@ -22,6 +26,9 @@ CONTAINER_NAME="nacp"
 LOCAL_BACKEND_PORT="${NACP_LOCAL_BACKEND_PORT:-23900}"
 LOCAL_FRONTEND_PORT="${NACP_LOCAL_FRONTEND_PORT:-23901}"
 LOCAL_FRONTEND_HOST="${NACP_LOCAL_FRONTEND_HOST:-127.0.0.1}"
+LOCAL_BACKEND_BIN="${NACP_LOCAL_BACKEND_BIN:-.tmp/nacp-local-backend}"
+LOCAL_BACKEND_LOG="${NACP_LOCAL_BACKEND_LOG:-.tmp/nacp-local-backend.log}"
+LOCAL_GO_BUILD_CACHE="${NACP_LOCAL_GO_BUILD_CACHE:-${SCRIPT_DIR}/.tmp/go-build-cache}"
 ONLINE_DB_HOST="${NACP_ONLINE_DB_HOST:-${DEPLOY_SERVER}}"
 ONLINE_DB_PORT="${NACP_ONLINE_DB_PORT:-3306}"
 
@@ -59,6 +66,8 @@ show_menu() {
     echo "  5) 停止/重启服务器"
     echo "  6) 紧急部署（本地构建 → push 镜像 → 服务器更新）"
     echo "  7) 运行测试"
+    echo "  8) 黑盒外部暴露面扫描"
+    echo "  9) 本地黑盒启动并扫描"
     echo "  0) 本地开发环境"
     echo ""
     echo -e "  ${YELLOW}输入选项编号:${NC}"
@@ -146,13 +155,64 @@ kill_port() {
     fi
 }
 
+kill_go_build_children_for_cwd() {
+    local current_dir
+    current_dir="$(pwd)"
+    local pid cwd
+    for pid in $(pgrep -f "/go-build.*/exe/main" 2>/dev/null); do
+        cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | tail -n 1)"
+        if [ "$cwd" = "$current_dir" ]; then
+            log_warn "发现旧 go run 子进程 (PID: ${pid})，正在清理..."
+            kill -9 "$pid" 2>/dev/null
+        fi
+    done
+}
+
+stop_local_backend_processes() {
+    pkill -f "go run main.go" 2>/dev/null && log_info "后端 go run 已停止" || true
+    pkill -f "$(pwd)/${LOCAL_BACKEND_BIN}" 2>/dev/null && log_info "后端本地二进制已停止" || true
+    kill_go_build_children_for_cwd
+    kill_port "${LOCAL_BACKEND_PORT}"
+}
+
+stop_local_frontend_processes() {
+    pkill -f "bun run dev" 2>/dev/null && log_info "前端 bun dev 已停止" || true
+    pkill -f "vite.*--port ${LOCAL_FRONTEND_PORT}" 2>/dev/null
+    kill_port "${LOCAL_FRONTEND_PORT}"
+}
+
+build_local_backend() {
+    mkdir -p "$(dirname "${LOCAL_BACKEND_BIN}")"
+    mkdir -p "${LOCAL_GO_BUILD_CACHE}"
+    log_info "构建本地后端: ${LOCAL_BACKEND_BIN}"
+    if ! GOCACHE="${LOCAL_GO_BUILD_CACHE}" go build -o "${LOCAL_BACKEND_BIN}" main.go; then
+        log_error "本地后端构建失败"
+        exit 1
+    fi
+}
+
+print_backend_log_tail() {
+    if [ -f "${LOCAL_BACKEND_LOG}" ]; then
+        log_warn "后端日志尾部 (${LOCAL_BACKEND_LOG}):"
+        tail -n 120 "${LOCAL_BACKEND_LOG}"
+    else
+        log_warn "后端日志文件不存在: ${LOCAL_BACKEND_LOG}"
+    fi
+}
+
 wait_backend_ready() {
     local url="http://localhost:${LOCAL_BACKEND_PORT}/api/status"
-    local retries="${1:-90}"
+    local retries="${1:-180}"
+    local backend_pid="${2:-}"
     local waited=0
 
     log_info "等待后端就绪: ${url}"
     while [ "$waited" -lt "$retries" ]; do
+        if [ -n "$backend_pid" ] && ! kill -0 "$backend_pid" 2>/dev/null; then
+            log_error "后端进程已退出，前端不会继续启动"
+            print_backend_log_tail
+            return 1
+        fi
         if curl -fsS "$url" >/dev/null 2>&1; then
             log_info "后端已就绪"
             return 0
@@ -164,7 +224,8 @@ wait_backend_ready() {
         fi
     done
 
-    log_error "后端 ${retries}s 内未就绪，请查看上方 Go 启动日志"
+    log_error "后端 ${retries}s 内未就绪"
+    print_backend_log_tail
     return 1
 }
 
@@ -200,6 +261,16 @@ export_local_dev_env() {
     export MEMORY_CACHE_ENABLED="${MEMORY_CACHE_ENABLED:-true}"
     export ERROR_LOG_ENABLED="${ERROR_LOG_ENABLED:-true}"
     export SKIP_DB_MIGRATION="${NACP_LOCAL_SKIP_DB_MIGRATION:-true}"
+}
+
+export_blackbox_dev_env() {
+    export_local_dev_env
+    export NACP_SECURITY_PROFILE=blackbox
+    export NACP_BLACKBOX_LOGIN_PATH="${NACP_BLACKBOX_LOGIN_PATH:-/client-login}"
+    export NACP_BLACKBOX_MASK_HEADERS=true
+    export NACP_BLACKBOX_MASK_UNAUTH_RELAY=true
+    export NACP_BLACKBOX_PUBLIC_REGISTER=false
+    export NACP_BLACKBOX_PUBLIC_OAUTH=false
 }
 
 remote_env_value() {
@@ -276,21 +347,19 @@ load_local_env_defaults() {
 
 stop_local_dev_processes() {
     log_info "停止本地开发进程..."
-    pkill -f "go run main.go" 2>/dev/null && log_info "后端 go run 已停止" || log_warn "未发现 go run 后端"
-    pkill -f "bun run dev" 2>/dev/null && log_info "前端 bun dev 已停止" || log_warn "未发现 bun dev 前端"
-    pkill -f "vite.*--port ${LOCAL_FRONTEND_PORT}" 2>/dev/null
-    kill_port "${LOCAL_BACKEND_PORT}"
-    kill_port "${LOCAL_FRONTEND_PORT}"
+    stop_local_backend_processes
+    stop_local_frontend_processes
 }
 
 local_dev() {
     local sub_choice="${1:-}"
 
     if [ -z "$sub_choice" ]; then
-        echo "  a) 启动后端 (go run)"
+        echo "  a) 启动后端 (本地构建后运行)"
         echo "  b) 启动前端 (bun run dev)"
         echo "  c) 同时启动后端+前端 [默认]"
         echo "  r) 重启后端+前端（使用线上测试数据库）"
+        echo "  m) 同时启动后端+前端，并执行数据库迁移"
         echo "  d) 停止本地开发"
         read -p "选择 [c]: " sub_choice
         sub_choice="${sub_choice:-c}"
@@ -302,45 +371,53 @@ local_dev() {
     case "$sub_choice" in
         a)
             ensure_web_dist
-            kill_port "${LOCAL_BACKEND_PORT}"
+            stop_local_backend_processes
             export_local_dev_env
+            build_local_backend
             log_info "启动后端 (端口 ${LOCAL_BACKEND_PORT})..."
             log_info "使用线上测试数据库: $(mask_dsn "$SQL_DSN")"
             log_info "按 Ctrl+C 停止"
-            go run main.go
+            "${LOCAL_BACKEND_BIN}"
             ;;
         b)
-            kill_port "${LOCAL_FRONTEND_PORT}"
+            stop_local_frontend_processes
             log_info "启动前端开发服务器 (端口 ${LOCAL_FRONTEND_PORT}, 热更新)..."
             log_info "按 Ctrl+C 停止"
             (cd web && bun install --frozen-lockfile 2>/dev/null; bun run dev -- --host "${LOCAL_FRONTEND_HOST}" --port "${LOCAL_FRONTEND_PORT}")
             ;;
-        c|r|restart)
+        c|r|restart|m|migrate)
             ensure_web_dist
-            if [ "$sub_choice" = "r" ] || [ "$sub_choice" = "restart" ]; then
-                stop_local_dev_processes
-            fi
-            kill_port "${LOCAL_BACKEND_PORT}"
-            kill_port "${LOCAL_FRONTEND_PORT}"
+            stop_local_dev_processes
             export_local_dev_env
+            if [ "$sub_choice" = "m" ] || [ "$sub_choice" = "migrate" ]; then
+                export SKIP_DB_MIGRATION=false
+            fi
+            build_local_backend
             log_info "启动后端+前端（热更新模式）..."
             log_info "后端: :${LOCAL_BACKEND_PORT} | 前端: :${LOCAL_FRONTEND_PORT} | 数据库: ${DEPLOY_SERVER}"
             log_info "浏览器访问: http://localhost:${LOCAL_FRONTEND_PORT}"
             log_info "后端 API: http://localhost:${LOCAL_BACKEND_PORT}"
             log_info "数据库 DSN: $(mask_dsn "$SQL_DSN")"
+            log_info "后端日志: ${LOCAL_BACKEND_LOG}"
+            log_info "数据库迁移: SKIP_DB_MIGRATION=${SKIP_DB_MIGRATION}"
             if [ -n "$LOG_SQL_DSN" ]; then
                 log_info "日志数据库 DSN: $(mask_dsn "$LOG_SQL_DSN")"
             else
                 log_warn "未配置 LOG_SQL_DSN，本地开发将使用业务库作为日志库"
             fi
-            log_info "前端修改即时生效（Vite HMR），后端修改需 Ctrl+C 重启"
+            log_info "前端修改即时生效（Vite HMR），后端修改需重启本地后端"
             log_info "按 Ctrl+C 停止所有进程"
             echo ""
             (cd web && bun install --frozen-lockfile 2>/dev/null)
+            : > "${LOCAL_BACKEND_LOG}"
+            "${LOCAL_BACKEND_BIN}" > "${LOCAL_BACKEND_LOG}" 2>&1 &
+            GO_PID=$!
+            if ! wait_backend_ready 120 "$GO_PID"; then
+                kill "$GO_PID" 2>/dev/null
+                exit 1
+            fi
             (cd web && bun run dev -- --host "${LOCAL_FRONTEND_HOST}" --port "${LOCAL_FRONTEND_PORT}") &
             BUN_PID=$!
-            go run main.go &
-            GO_PID=$!
             if ! wait_frontend_ready 60; then
                 kill "$GO_PID" "$BUN_PID" 2>/dev/null
                 exit 1
@@ -465,6 +542,43 @@ run_tests() {
     go build ./... 2>&1 | grep -v "web/dist" || log_info "✅ 编译通过"
 }
 
+# ─── 选项 8: 黑盒外部暴露面扫描 ───────────────────────────────────────────────
+blackbox_scan() {
+    local base_url="${1:-${NACP_BLACKBOX_SCAN_BASE_URL:-http://localhost:${LOCAL_BACKEND_PORT}}}"
+    local login_path="${2:-${NACP_BLACKBOX_LOGIN_PATH:-/client-login}}"
+    if [ ! -x "bin/blackbox_scan.sh" ]; then
+        chmod +x bin/blackbox_scan.sh 2>/dev/null
+    fi
+    log_info "扫描目标: ${base_url}"
+    log_info "隐藏登录路径: ${login_path}"
+    bin/blackbox_scan.sh "${base_url}" "${login_path}"
+}
+
+# ─── 选项 9: 本地黑盒启动并扫描 ───────────────────────────────────────────────
+blackbox_local_scan() {
+    local login_path="${1:-${NACP_BLACKBOX_LOGIN_PATH:-/client-login}}"
+    ensure_web_dist
+    stop_local_backend_processes
+    load_local_env_defaults
+    export_blackbox_dev_env
+    export NACP_BLACKBOX_LOGIN_PATH="${login_path}"
+    build_local_backend
+    log_info "启动本地黑盒后端用于扫描..."
+    log_info "后端: :${LOCAL_BACKEND_PORT} | 隐藏登录路径: ${NACP_BLACKBOX_LOGIN_PATH}"
+    log_info "数据库 DSN: $(mask_dsn "$SQL_DSN")"
+    : > "${LOCAL_BACKEND_LOG}"
+    "${LOCAL_BACKEND_BIN}" > "${LOCAL_BACKEND_LOG}" 2>&1 &
+    GO_PID=$!
+    if ! wait_backend_ready 120 "$GO_PID"; then
+        kill "$GO_PID" 2>/dev/null
+        exit 1
+    fi
+    bin/blackbox_scan.sh "http://localhost:${LOCAL_BACKEND_PORT}" "${NACP_BLACKBOX_LOGIN_PATH}"
+    SCAN_STATUS=$?
+    kill "$GO_PID" 2>/dev/null
+    exit "$SCAN_STATUS"
+}
+
 # ─── 主逻辑 ───────────────────────────────────────────────────────────────────
 main() {
     local choice="${1:-}"
@@ -484,6 +598,8 @@ main() {
         5) server_control ;;
         6) emergency_deploy ;;
         7) run_tests ;;
+        8) blackbox_scan "${2:-}" "${3:-}" ;;
+        9) blackbox_local_scan "${2:-}" ;;
         *)
             log_error "未知选项: $choice"
             show_menu

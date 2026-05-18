@@ -142,11 +142,15 @@ func main() {
 	}
 
 	if os.Getenv("ENABLE_PPROF") == "true" {
-		gopool.Go(func() {
-			log.Println(http.ListenAndServe("0.0.0.0:8005", nil))
-		})
-		go common.Monitor()
-		common.SysLog("pprof enabled")
+		if common.IsBlackboxEnabled() {
+			common.SysLog("pprof disabled because blackbox security profile is enabled")
+		} else {
+			gopool.Go(func() {
+				log.Println(http.ListenAndServe("0.0.0.0:8005", nil))
+			})
+			go common.Monitor()
+			common.SysLog("pprof enabled")
+		}
 	}
 
 	err = common.StartPyroScope()
@@ -156,8 +160,13 @@ func main() {
 
 	// Initialize HTTP server
 	server := gin.New()
+	server.HandleMethodNotAllowed = true
 	server.Use(gin.CustomRecovery(func(c *gin.Context, err any) {
 		common.SysLog(fmt.Sprintf("panic detected: %v", err))
+		if common.IsBlackboxEnabled() {
+			middleware.AbortBlackboxNotFound(c)
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": gin.H{
 				"message": fmt.Sprintf("Panic detected, error: %v. Please submit a issue here: https://github.com/Calcium-Ion/new-api", err),

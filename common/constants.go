@@ -72,6 +72,13 @@ var EmailLoginAuthServerList = []string{
 var DebugEnabled bool
 var MemoryCacheEnabled bool
 
+var SecurityProfile = "normal"
+var BlackboxLoginPath = "/client-login"
+var BlackboxMaskHeaders = true
+var BlackboxMaskUnauthRelay = true
+var BlackboxPublicRegister = false
+var BlackboxPublicOAuth = false
+
 var LogConsumeEnabled = true
 
 var TLSInsecureSkipVerify bool

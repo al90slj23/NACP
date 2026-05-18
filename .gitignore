@@ -30,9 +30,15 @@ data/
 .gocache-temp
 .gopath
 .test
+.tmp/
+test-results/
+service/testdata/rapid/**/*.fail
 token_estimator_test.go
 skills-lock.json
 
 # NACP specific
 ZERO/
 .analysis/
+ReferenceProjects/
+NewAPIv0.13.2/
+web/vite.config.js.timestamp-*.mjs
