@@ -34,6 +34,24 @@ func TestApplyChannelAffinityOverrideTemplate_NoTemplate(t *testing.T) {
 	require.Equal(t, base, merged)
 }
 
+func TestChannelAffinitySelectedChannelIDIsRecordedOnlyWhenUsed(t *testing.T) {
+	ctx := buildChannelAffinityTemplateContextForTest(channelAffinityMeta{
+		RuleName:   "rule-selected",
+		SkipRetry:  false,
+		UsingGroup: "default",
+		ModelName:  "gpt-5",
+	})
+
+	_, found := GetChannelAffinitySelectedChannelID(ctx)
+	require.False(t, found)
+
+	MarkChannelAffinityUsed(ctx, "default", 123)
+
+	channelID, found := GetChannelAffinitySelectedChannelID(ctx)
+	require.True(t, found)
+	require.Equal(t, 123, channelID)
+}
+
 func TestApplyChannelAffinityOverrideTemplate_MergeTemplate(t *testing.T) {
 	ctx := buildChannelAffinityTemplateContextForTest(channelAffinityMeta{
 		RuleName: "rule-with-template",
@@ -144,7 +162,7 @@ func TestShouldSkipRetryAfterChannelAffinityFailure(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "fallback to matched rule meta",
+			name: "matched rule meta alone does not skip before affinity is used",
 			ctx: func() *gin.Context {
 				return buildChannelAffinityTemplateContextForTest(channelAffinityMeta{
 					RuleName:   "rule-skip-retry",
@@ -152,6 +170,20 @@ func TestShouldSkipRetryAfterChannelAffinityFailure(t *testing.T) {
 					UsingGroup: "default",
 					ModelName:  "gpt-5",
 				})
+			},
+			want: false,
+		},
+		{
+			name: "used affinity channel applies matched rule skip retry",
+			ctx: func() *gin.Context {
+				ctx := buildChannelAffinityTemplateContextForTest(channelAffinityMeta{
+					RuleName:   "rule-skip-retry-used",
+					SkipRetry:  true,
+					UsingGroup: "default",
+					ModelName:  "gpt-5",
+				})
+				MarkChannelAffinityUsed(ctx, "default", 456)
+				return ctx
 			},
 			want: true,
 		},

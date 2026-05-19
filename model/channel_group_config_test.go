@@ -219,3 +219,162 @@ func TestChannelDefaultSchedulingUpdateDoesNotOverwriteExplicitGroupConfigs(t *t
 	require.Equal(t, newPriority, *updated.Priority)
 	require.Equal(t, newWeight, *updated.Weight)
 }
+
+func TestChannelCacheUsesPerGroupAbilityScheduling(t *testing.T) {
+	resetChannelGroupConfigTestTables(t)
+
+	oldMemoryCacheEnabled := common.MemoryCacheEnabled
+	oldGroup2Model2Channels := group2model2channels
+	oldChannelsIDM := channelsIDM
+	t.Cleanup(func() {
+		common.MemoryCacheEnabled = oldMemoryCacheEnabled
+		channelSyncLock.Lock()
+		group2model2channels = oldGroup2Model2Channels
+		channelsIDM = oldChannelsIDM
+		channelSyncLock.Unlock()
+	})
+	common.MemoryCacheEnabled = true
+
+	alphaHigh := int64(100)
+	alphaLow := int64(10)
+	betaHigh := int64(100)
+	betaLow := int64(10)
+	zeroWeight := uint(0)
+
+	channelA := Channel{
+		Type:     1,
+		Key:      "sk-a",
+		Status:   common.ChannelStatusEnabled,
+		Name:     "cache-group-config-a",
+		Models:   "gpt-a",
+		Group:    "alpha,beta",
+		Priority: common.GetPointer[int64](1),
+		Weight:   common.GetPointer[uint](1),
+		GroupConfigs: []ChannelGroupConfig{
+			{Group: "alpha", Priority: &alphaHigh, Weight: &zeroWeight},
+			{Group: "beta", Priority: &betaLow, Weight: &zeroWeight},
+		},
+	}
+	require.NoError(t, channelA.Insert())
+
+	channelB := Channel{
+		Type:     1,
+		Key:      "sk-b",
+		Status:   common.ChannelStatusEnabled,
+		Name:     "cache-group-config-b",
+		Models:   "gpt-a",
+		Group:    "alpha,beta",
+		Priority: common.GetPointer[int64](999),
+		Weight:   common.GetPointer[uint](999),
+		GroupConfigs: []ChannelGroupConfig{
+			{Group: "alpha", Priority: &alphaLow, Weight: &zeroWeight},
+			{Group: "beta", Priority: &betaHigh, Weight: &zeroWeight},
+		},
+	}
+	require.NoError(t, channelB.Insert())
+
+	InitChannelCache()
+
+	alphaFirst, err := GetNextSatisfiedChannel("alpha", "gpt-a", nil)
+	require.NoError(t, err)
+	require.NotNil(t, alphaFirst)
+	require.Equal(t, channelA.Id, alphaFirst.Id)
+
+	betaFirst, err := GetNextSatisfiedChannel("beta", "gpt-a", nil)
+	require.NoError(t, err)
+	require.NotNil(t, betaFirst)
+	require.Equal(t, channelB.Id, betaFirst.Id)
+
+	alphaRandom, err := GetRandomSatisfiedChannel("alpha", "gpt-a", 0)
+	require.NoError(t, err)
+	require.NotNil(t, alphaRandom)
+	require.Equal(t, channelA.Id, alphaRandom.Id)
+
+	betaRandom, err := GetRandomSatisfiedChannel("beta", "gpt-a", 0)
+	require.NoError(t, err)
+	require.NotNil(t, betaRandom)
+	require.Equal(t, channelB.Id, betaRandom.Id)
+}
+
+func TestRandomSelectionUsesRawWeightWithinHighestPriorityLayer(t *testing.T) {
+	resetChannelGroupConfigTestTables(t)
+
+	oldMemoryCacheEnabled := common.MemoryCacheEnabled
+	oldGroup2Model2Channels := group2model2channels
+	oldChannelsIDM := channelsIDM
+	t.Cleanup(func() {
+		common.MemoryCacheEnabled = oldMemoryCacheEnabled
+		channelSyncLock.Lock()
+		group2model2channels = oldGroup2Model2Channels
+		channelsIDM = oldChannelsIDM
+		channelSyncLock.Unlock()
+	})
+
+	topPriority := int64(5)
+	lowerPriority := int64(3)
+	zeroWeight := uint(0)
+	nonZeroWeight := uint(3)
+	largeLowerWeight := uint(999)
+
+	channelZeroTop := Channel{
+		Type:     1,
+		Key:      "sk-zero-top",
+		Status:   common.ChannelStatusEnabled,
+		Name:     "random-weight-zero-top",
+		Models:   "gpt-a",
+		Group:    "alpha",
+		Priority: common.GetPointer[int64](0),
+		Weight:   common.GetPointer[uint](0),
+		GroupConfigs: []ChannelGroupConfig{
+			{Group: "alpha", Priority: &topPriority, Weight: &zeroWeight},
+		},
+	}
+	require.NoError(t, channelZeroTop.Insert())
+
+	channelWeightedTop := Channel{
+		Type:     1,
+		Key:      "sk-weighted-top",
+		Status:   common.ChannelStatusEnabled,
+		Name:     "random-weight-weighted-top",
+		Models:   "gpt-a",
+		Group:    "alpha",
+		Priority: common.GetPointer[int64](0),
+		Weight:   common.GetPointer[uint](0),
+		GroupConfigs: []ChannelGroupConfig{
+			{Group: "alpha", Priority: &topPriority, Weight: &nonZeroWeight},
+		},
+	}
+	require.NoError(t, channelWeightedTop.Insert())
+
+	channelLower := Channel{
+		Type:     1,
+		Key:      "sk-lower",
+		Status:   common.ChannelStatusEnabled,
+		Name:     "random-weight-lower",
+		Models:   "gpt-a",
+		Group:    "alpha",
+		Priority: common.GetPointer[int64](0),
+		Weight:   common.GetPointer[uint](0),
+		GroupConfigs: []ChannelGroupConfig{
+			{Group: "alpha", Priority: &lowerPriority, Weight: &largeLowerWeight},
+		},
+	}
+	require.NoError(t, channelLower.Insert())
+
+	common.MemoryCacheEnabled = false
+	for i := 0; i < 10; i++ {
+		selected, err := GetChannel("alpha", "gpt-a", 0)
+		require.NoError(t, err)
+		require.NotNil(t, selected)
+		require.Equal(t, channelWeightedTop.Id, selected.Id)
+	}
+
+	common.MemoryCacheEnabled = true
+	InitChannelCache()
+	for i := 0; i < 10; i++ {
+		selected, err := GetRandomSatisfiedChannel("alpha", "gpt-a", 0)
+		require.NoError(t, err)
+		require.NotNil(t, selected)
+		require.Equal(t, channelWeightedTop.Id, selected.Id)
+	}
+}

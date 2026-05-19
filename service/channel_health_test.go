@@ -377,6 +377,8 @@ func TestDefaultHealthConfig(t *testing.T) {
 	assert.Equal(t, 2, cfg.PreWarmChannelCount)
 	assert.Equal(t, 2, cfg.LowChannelWarningThreshold)
 	assert.Equal(t, 3*time.Second, cfg.ProbeTimeout)
+	assert.Equal(t, 20*time.Second, cfg.FirstByteTimeout)
+	assert.Equal(t, 60*time.Second, cfg.TotalRetryTimeout)
 	assert.Equal(t, 5*time.Minute, cfg.DegradedProbeInterval)
 	assert.Equal(t, 10*time.Minute, cfg.RecoveryObservationPeriod)
 }

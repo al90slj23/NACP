@@ -117,7 +117,7 @@ func Distribute() func(c *gin.Context) {
 							for _, g := range autoGroups {
 								if model.IsChannelEnabledForGroupModel(g, modelRequest.Model, preferred.Id) {
 									selectGroup = g
-									common.SetContextKey(c, constant.ContextKeyAutoGroup, g)
+									setSelectedAutoGroupContext(c, autoGroups, g)
 									channel = preferred
 									service.MarkChannelAffinityUsed(c, g, preferred.Id)
 									break
@@ -132,9 +132,10 @@ func Distribute() func(c *gin.Context) {
 				}
 
 				if channel == nil {
-					// NACP: SFT uses the same deterministic order for the first
-					// formal attempt and all later failover attempts.
-					channel, selectGroup, err = service.CacheGetNextSatisfiedChannel(&service.RetryParam{
+					// NACP: The first formal attempt uses weighted random selection
+					// within the highest priority layer. SFT failover after an
+					// upstream error uses the deterministic priority/weight queue.
+					channel, selectGroup, err = service.CacheGetRandomSatisfiedChannel(&service.RetryParam{
 						Ctx:        c,
 						ModelName:  modelRequest.Model,
 						TokenGroup: usingGroup,
@@ -165,6 +166,19 @@ func Distribute() func(c *gin.Context) {
 		c.Next()
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
 			service.RecordChannelAffinity(c, channel.Id)
+		}
+	}
+}
+
+func setSelectedAutoGroupContext(c *gin.Context, autoGroups []string, selectedGroup string) {
+	if c == nil || selectedGroup == "" {
+		return
+	}
+	common.SetContextKey(c, constant.ContextKeyAutoGroup, selectedGroup)
+	for idx, group := range autoGroups {
+		if group == selectedGroup {
+			common.SetContextKey(c, constant.ContextKeyAutoGroupIndex, idx)
+			return
 		}
 	}
 }

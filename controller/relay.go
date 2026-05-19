@@ -93,27 +93,15 @@ func executeRelayAttempt(c *gin.Context, relayFormat types.RelayFormat, relayInf
 }
 
 func relayRequestStartTime(c *gin.Context) time.Time {
-	startTime := common.GetContextKeyTime(c, constant.ContextKeyRelayReceivedAt)
-	if startTime.IsZero() {
-		startTime = common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
-	}
-	if startTime.IsZero() {
-		startTime = time.Now()
-	}
-	return startTime
+	return service.RelayRequestStartTime(c)
 }
 
 func sftRetryTimeoutRemaining(c *gin.Context, cfg *service.ChannelHealthConfig) (time.Duration, bool) {
-	if cfg == nil || cfg.TotalRetryTimeout <= 0 {
-		return 0, false
-	}
-	remaining := cfg.TotalRetryTimeout - time.Since(relayRequestStartTime(c))
-	return remaining, true
+	return service.SFTRetryTimeoutRemaining(c, cfg)
 }
 
 func sftRetryTimedOut(c *gin.Context, cfg *service.ChannelHealthConfig) bool {
-	remaining, enabled := sftRetryTimeoutRemaining(c, cfg)
-	return enabled && remaining <= 0
+	return service.SFTRetryTimedOut(c, cfg)
 }
 
 func relayUpstreamAttemptStartTime(c *gin.Context) time.Time {
@@ -169,6 +157,17 @@ func shouldContinueSequentialFailover(c *gin.Context, openaiErr *types.NewAPIErr
 	return code < 200 || code >= 300
 }
 
+func shouldExcludeSequentialAttempt(channelID int, affinityPrependChannelID int, affinityPrependPending *bool) bool {
+	if channelID <= 0 {
+		return false
+	}
+	if affinityPrependPending != nil && *affinityPrependPending && channelID == affinityPrependChannelID {
+		*affinityPrependPending = false
+		return false
+	}
+	return true
+}
+
 func recordClientVisibleErrorLog(c *gin.Context, apiErr *types.NewAPIError, useChannel []string) {
 	if apiErr == nil || !constant.ErrorLogEnabled || !types.IsRecordErrorLog(apiErr) {
 		return
@@ -196,6 +195,29 @@ func recordClientVisibleErrorLog(c *gin.Context, apiErr *types.NewAPIError, useC
 	startTime := relayUpstreamAttemptStartTime(c)
 	useTimeSeconds := int(time.Since(startTime).Seconds())
 	model.RecordErrorLogWithType(c, model.LogTypeErrorClientVisible, userId, channelId, modelName, tokenName, apiErr.MaskSensitiveErrorWithStatusCode(), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
+}
+
+func selectedRelayChannelFromContext(c *gin.Context, info *relaycommon.RelayInfo) *model.Channel {
+	channelID := c.GetInt("channel_id")
+	channelType := c.GetInt("channel_type")
+	if channelID <= 0 && info != nil && info.ChannelMeta != nil {
+		channelID = info.ChannelMeta.ChannelId
+		channelType = info.ChannelMeta.ChannelType
+	}
+	if channelID <= 0 {
+		return nil
+	}
+	autoBan := c.GetBool("auto_ban")
+	autoBanInt := 1
+	if !autoBan {
+		autoBanInt = 0
+	}
+	return &model.Channel{
+		Id:      channelID,
+		Type:    channelType,
+		Name:    c.GetString("channel_name"),
+		AutoBan: &autoBanInt,
+	}
 }
 
 func Relay(c *gin.Context, relayFormat types.RelayFormat) {
@@ -324,12 +346,16 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	// tried with the real user request once; intermediate errors are intercepted,
 	// and the final exhausted error is returned to the client as type 52.
 	realTriedChannelIDs := make(map[int]bool)
+	affinityPrependChannelID, affinityPrependPending := service.GetChannelAffinitySelectedChannelID(c)
 	cfg := service.GetHealthConfig()
 
 	const maxSequentialFailoverAttempts = 100
 	for attempt := 0; attempt < maxSequentialFailoverAttempts; attempt++ {
 		retryParam.SetRetry(attempt)
-		if newAPIError != nil && sftRetryTimedOut(c, cfg) {
+		if sftRetryTimedOut(c, cfg) {
+			if newAPIError == nil {
+				newAPIError = service.NewSFTTotalTimeoutError(c, cfg)
+			}
 			break
 		}
 		if apiErr := service.NewRequestCanceledErrorIfDone(c); apiErr != nil {
@@ -348,7 +374,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 
-		realTriedChannelIDs[channel.Id] = true
+		if shouldExcludeSequentialAttempt(channel.Id, affinityPrependChannelID, &affinityPrependPending) {
+			realTriedChannelIDs[channel.Id] = true
+		}
 		addUsedChannel(c, channel.Id)
 		common.SetContextKey(c, constant.ContextKeyUpstreamStartedAt, time.Now())
 		newAPIError = executeRelayAttempt(c, relayFormat, relayInfo, ws)
@@ -424,18 +452,13 @@ func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
 }
 
 func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
-	if info.ChannelMeta == nil {
-		autoBan := c.GetBool("auto_ban")
-		autoBanInt := 1
-		if !autoBan {
-			autoBanInt = 0
+	if retryParam.GetRetry() == 0 {
+		if channel := selectedRelayChannelFromContext(c, info); channel != nil {
+			return channel, nil
 		}
-		return &model.Channel{
-			Id:      c.GetInt("channel_id"),
-			Type:    c.GetInt("channel_type"),
-			Name:    c.GetString("channel_name"),
-			AutoBan: &autoBanInt,
-		}, nil
+	}
+	if info.ChannelMeta == nil {
+		return selectedRelayChannelFromContext(c, info), nil
 	}
 	var channel *model.Channel
 	var selectGroup string

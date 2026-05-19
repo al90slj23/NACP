@@ -519,16 +519,35 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		}
 	}
 
+	firstByteCtx, firstByteGuard := service.NewSFTFirstByteTimeoutContext(c, req.Context(), service.GetHealthConfig())
+	if firstByteGuard != nil {
+		req = req.WithContext(firstByteCtx)
+	}
 	resp, err := client.Do(req)
+	if firstByteGuard != nil {
+		firstByteGuard.StopFirstByteTimer()
+	}
 	if err != nil {
 		if apiErr := service.NewRequestCanceledErrorIfDone(c); apiErr != nil {
 			return nil, apiErr
+		}
+		if firstByteGuard != nil {
+			defer firstByteGuard.Cancel()
+			if firstByteGuard.TimedOut() {
+				return nil, service.NewSFTFirstByteTimeoutError(firstByteGuard.Timeout())
+			}
 		}
 		logger.LogError(c, "do request failed: "+err.Error())
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
 	}
 	if resp == nil {
+		if firstByteGuard != nil {
+			firstByteGuard.Cancel()
+		}
 		return nil, errors.New("resp is nil")
+	}
+	if firstByteGuard != nil {
+		firstByteGuard.WrapResponseBody(resp)
 	}
 
 	_ = req.Body.Close()

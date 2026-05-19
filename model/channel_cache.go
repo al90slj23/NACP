@@ -14,8 +14,14 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
 
-var group2model2channels map[string]map[string][]int // enabled channel
-var channelsIDM map[int]*Channel                     // all channels include disabled
+type cachedChannelAbility struct {
+	ChannelId int
+	Priority  int64
+	Weight    uint
+}
+
+var group2model2channels map[string]map[string][]cachedChannelAbility // enabled ability entries
+var channelsIDM map[int]*Channel                                      // all channels include disabled
 var channelSyncLock sync.RWMutex
 
 func InitChannelCache() {
@@ -30,45 +36,49 @@ func InitChannelCache() {
 	}
 	var abilities []*Ability
 	DB.Find(&abilities)
-	groups := make(map[string]bool)
+	newGroup2model2channels := make(map[string]map[string][]cachedChannelAbility)
 	for _, ability := range abilities {
-		groups[ability.Group] = true
-	}
-	newGroup2model2channels := make(map[string]map[string][]int)
-	for group := range groups {
-		newGroup2model2channels[group] = make(map[string][]int)
-	}
-	for _, channel := range channels {
-		if channel.Status != common.ChannelStatusEnabled {
-			continue // skip disabled channels
+		if !ability.Enabled {
+			continue
 		}
-		groups := strings.Split(channel.Group, ",")
-		for _, group := range groups {
-			models := strings.Split(channel.Models, ",")
-			for _, model := range models {
-				if _, ok := newGroup2model2channels[group][model]; !ok {
-					newGroup2model2channels[group][model] = make([]int, 0)
-				}
-				newGroup2model2channels[group][model] = append(newGroup2model2channels[group][model], channel.Id)
-			}
+		group := strings.TrimSpace(ability.Group)
+		model := strings.TrimSpace(ability.Model)
+		if group == "" || model == "" || ability.ChannelId <= 0 {
+			continue
 		}
+		channel, ok := newChannelId2channel[ability.ChannelId]
+		if !ok || channel.Status != common.ChannelStatusEnabled {
+			continue
+		}
+		if _, ok := newGroup2model2channels[group]; !ok {
+			newGroup2model2channels[group] = make(map[string][]cachedChannelAbility)
+		}
+		priority := channel.GetPriority()
+		if ability.Priority != nil {
+			priority = *ability.Priority
+		}
+		newGroup2model2channels[group][model] = append(newGroup2model2channels[group][model], cachedChannelAbility{
+			ChannelId: ability.ChannelId,
+			Priority:  priority,
+			Weight:    ability.Weight,
+		})
 	}
 
-	// Sort for deterministic sequential failover: priority first, then weight.
+	// Sort for deterministic sequential failover: group/model ability priority first, then weight.
 	for group, model2channels := range newGroup2model2channels {
-		for model, channels := range model2channels {
-			sort.Slice(channels, func(i, j int) bool {
-				left := newChannelId2channel[channels[i]]
-				right := newChannelId2channel[channels[j]]
-				if left.GetPriority() != right.GetPriority() {
-					return left.GetPriority() > right.GetPriority()
+		for model, entries := range model2channels {
+			sort.Slice(entries, func(i, j int) bool {
+				left := entries[i]
+				right := entries[j]
+				if left.Priority != right.Priority {
+					return left.Priority > right.Priority
 				}
-				if left.GetWeight() != right.GetWeight() {
-					return left.GetWeight() > right.GetWeight()
+				if left.Weight != right.Weight {
+					return left.Weight > right.Weight
 				}
-				return left.Id < right.Id
+				return left.ChannelId < right.ChannelId
 			})
-			newGroup2model2channels[group][model] = channels
+			newGroup2model2channels[group][model] = entries
 		}
 	}
 
@@ -130,7 +140,7 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, excludeIDs
 	}
 
 	if len(channels) == 1 {
-		chID := channels[0]
+		chID := channels[0].ChannelId
 		// Check exclusion and health
 		if excluded != nil && excluded[chID] {
 			return nil, nil
@@ -145,11 +155,11 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, excludeIDs
 	}
 
 	uniquePriorities := make(map[int]bool)
-	for _, channelId := range channels {
-		if channel, ok := channelsIDM[channelId]; ok {
-			uniquePriorities[int(channel.GetPriority())] = true
+	for _, entry := range channels {
+		if _, ok := channelsIDM[entry.ChannelId]; ok {
+			uniquePriorities[int(entry.Priority)] = true
 		} else {
-			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
+			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", entry.ChannelId)
 		}
 	}
 	var sortedUniquePriorities []int
@@ -165,10 +175,10 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, excludeIDs
 
 	// get the priority for the given retry number
 	var sumWeight = 0
-	var targetChannels []*Channel
-	for _, channelId := range channels {
-		if channel, ok := channelsIDM[channelId]; ok {
-			if channel.GetPriority() == targetPriority {
+	var targetChannels []cachedChannelAbility
+	for _, entry := range channels {
+		if channel, ok := channelsIDM[entry.ChannelId]; ok {
+			if entry.Priority == targetPriority {
 				// NACP: Skip degraded channels
 				if channel.HealthStatus == common.ChannelHealthStatusDegraded {
 					continue
@@ -177,22 +187,22 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, excludeIDs
 				if excluded != nil && excluded[channel.Id] {
 					continue
 				}
-				sumWeight += channel.GetWeight()
-				targetChannels = append(targetChannels, channel)
+				sumWeight += int(entry.Weight)
+				targetChannels = append(targetChannels, entry)
 			}
 		} else {
-			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
+			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", entry.ChannelId)
 		}
 	}
 
 	// NACP: Fallback — if all channels filtered out, retry with unfiltered list
 	if len(targetChannels) == 0 && excluded == nil {
 		// Try without health/exclusion filter as safety net
-		for _, channelId := range channels {
-			if channel, ok := channelsIDM[channelId]; ok {
-				if channel.GetPriority() == targetPriority {
-					sumWeight += channel.GetWeight()
-					targetChannels = append(targetChannels, channel)
+		for _, entry := range channels {
+			if _, ok := channelsIDM[entry.ChannelId]; ok {
+				if entry.Priority == targetPriority {
+					sumWeight += int(entry.Weight)
+					targetChannels = append(targetChannels, entry)
 				}
 			}
 		}
@@ -226,9 +236,13 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, excludeIDs
 	randomWeight := rand.Intn(totalWeight)
 
 	// Find a channel based on its weight
-	for _, channel := range targetChannels {
-		randomWeight -= channel.GetWeight()*smoothingFactor + smoothingAdjustment
+	for _, entry := range targetChannels {
+		randomWeight -= int(entry.Weight)*smoothingFactor + smoothingAdjustment
 		if randomWeight < 0 {
+			channel, ok := channelsIDM[entry.ChannelId]
+			if !ok {
+				return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", entry.ChannelId)
+			}
 			return channel, nil
 		}
 	}
@@ -257,13 +271,13 @@ func GetNextSatisfiedChannel(group string, model string, excluded map[int]bool) 
 		return nil, nil
 	}
 
-	for _, channelId := range channels {
-		if excluded != nil && excluded[channelId] {
+	for _, entry := range channels {
+		if excluded != nil && excluded[entry.ChannelId] {
 			continue
 		}
-		channel, ok := channelsIDM[channelId]
+		channel, ok := channelsIDM[entry.ChannelId]
 		if !ok {
-			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
+			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", entry.ChannelId)
 		}
 		if channel.Status != common.ChannelStatusEnabled {
 			continue
@@ -319,8 +333,8 @@ func CacheUpdateChannelStatus(id int, status int) {
 		// delete the channel from group2model2channels
 		for group, model2channels := range group2model2channels {
 			for model, channels := range model2channels {
-				for i, channelId := range channels {
-					if channelId == id {
+				for i, entry := range channels {
+					if entry.ChannelId == id {
 						// remove the channel from the slice
 						group2model2channels[group][model] = append(channels[:i], channels[i+1:]...)
 						break

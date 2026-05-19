@@ -1,6 +1,6 @@
 # NACP 渠道分组调度配置说明
 
-> 最后更新：2026-05-18
+> 最后更新：2026-05-19
 
 ## 背景
 
@@ -55,10 +55,82 @@ NewAPI 原始渠道表中 `channels.priority` 和 `channels.weight` 是渠道级
 
 1. 先按请求分组和模型筛选 `abilities`。
 2. 按 `priority DESC` 选择优先级层。
-3. 同优先级内按 `weight` 做权重选择或顺序兜底。
-4. SFT 顺位容错中的 `GetNextChannel` 使用 `priority DESC, weight DESC, channel_id ASC`。
+3. 无亲和的首次正式请求：只在最高优先级层内按原始 `weight` 做概率选择。
+4. SFT 顺位容错队列：使用 `priority DESC, weight DESC, channel_id ASC`，此时 `weight` 是同优先级内的子排序，不再是概率。
 
 这意味着 `channel_group_configs` 是配置源，`abilities` 是调度索引。
+
+## 2026-05-19 缓存路径修正
+
+本地和测试环境默认 `MEMORY_CACHE_ENABLED=true`。修正前，内存缓存会从 `channels.group` / `channels.models` 重建 `group -> model -> channel_id`，并使用 `channels.priority` / `channels.weight` 排序。这会导致同一个渠道在不同分组的独立调度配置被绕过。
+
+修正后：
+
+1. `InitChannelCache()` 直接读取 `abilities` 构建缓存。
+2. 缓存项保存 `channel_id + abilities.priority + abilities.weight`。
+3. `GetNextSatisfiedChannel()` 在缓存路径下按 `abilities.priority DESC, abilities.weight DESC, channel_id ASC` 顺序选择。
+4. `GetRandomSatisfiedChannel()` 在缓存路径下按 `abilities.priority` 选择优先级层，并用 `abilities.weight` 做同优先级内权重选择。
+5. `IsChannelEnabledForGroupModel()` 仍通过缓存判断渠道是否属于指定分组/模型，只是缓存列表元素从裸 `channel_id` 变成带调度信息的条目。
+
+这个边界很重要：任何新调度逻辑都必须保证数据库路径和内存缓存路径读取同一套调度语义，即 `abilities`，不能重新回退到 `channels.priority` / `channels.weight`。
+
+## 2026-05-19 首次选择与 SFT 重试队列
+
+NACP 当前采用“首次概率，失败后确定队列”的策略：
+
+1. 没有渠道亲和时，首次正式请求只在最高优先级层内按原始 `weight` 随机。
+2. 如果最高优先级层所有渠道 `weight=0`，则在该层内等概率随机。
+3. 一旦首次请求失败，进入 SFT 顺位容错队列。
+4. SFT 队列不再按概率随机，而是按 `priority DESC, weight DESC, channel_id ASC` 确定排序。
+5. 非最高优先级层的权重不会影响首次概率，只会影响后续队列中的同层顺序。
+6. Relay 第一轮必须使用 Distributor 已经选好的渠道，不能在进入 relay 循环后再次用顺位队列覆盖首次随机结果。
+
+例子：
+
+```text
+A priority=3 weight=1
+B priority=2 weight=1
+C priority=5 weight=8
+D priority=5 weight=3
+E priority=1 weight=6
+F priority=1 weight=9
+```
+
+无亲和时：
+
+```text
+8/11 概率：C -> D -> A -> B -> F -> E
+3/11 概率：D -> C -> A -> B -> F -> E
+```
+
+如果亲和渠道为 `A`：
+
+```text
+A -> C -> D -> A -> B -> F -> E
+```
+
+如果亲和渠道为 `C`：
+
+```text
+C -> C -> D -> A -> B -> F -> E
+```
+
+注意：亲和前置机会不改变原始分组队列，因此亲和渠道在原始队列中仍保留一次按自身位置重试的机会。
+
+`using_group=auto` 的亲和命中需要额外记录命中的 auto 分组下标。后续 SFT 重试必须从该下标对应分组继续，而不是回到 auto 的第一个分组重新选路。
+
+## 2026-05-19 SFT 首字超时与总预算
+
+SFT 顺位容错的时间限制已经从“下一跳启动前软检查”调整为“首字硬预算”：
+
+1. 总预算从 NACP 接收到 relay 请求的 `relay_received_at` 开始计算，默认 `60s`。
+2. 单渠道正式请求等待上游首字/响应头的上限默认 `20s`。
+3. 每次正式请求实际等待首字的时间为 `min(20s, 总剩余时间)`。
+4. 如果 A/B/C 已经耗时 59 秒，D 最多只能等待 1 秒首字，不允许 D 再单独跑 20 秒或更久。
+5. 首字到达后，流式完整输出不受 SFT 60 秒/20 秒限制，继续走原有流式扫描、保活和流式超时机制。
+6. `RELAY_TIMEOUT` 保留为 NewAPI 原生全局 HTTP client 生命周期超时，默认 `0` 等于关闭。它可能覆盖完整响应体读取和完整流式输出，因此不能用来表达 SFT 首字限制。
+
+这条规则和渠道队列顺序共同决定最终行为：队列顺序负责“下一个是谁”，首字预算负责“每个尝试最多等多久、整条链最多等多久”。
 
 ## 兼容规则
 
@@ -97,3 +169,4 @@ NewAPI 原始渠道表中 `channels.priority` 和 `channels.weight` 是渠道级
 4. 前端构建：渠道弹窗可正常渲染“分组调度配置”。
 5. 三数据库迁移：`channel_group_configs` 必须通过 GORM AutoMigrate 支持 SQLite、MySQL、PostgreSQL。
 6. 旧批量入口：无显式分组配置的渠道修改默认值后会生成分组配置；已有显式分组配置的渠道不会被默认值覆盖。
+7. 内存缓存路径：开启 `MEMORY_CACHE_ENABLED=true`，构造两个渠道的全局优先级和分组优先级相反，确认 `GetNextSatisfiedChannel()` / `GetRandomSatisfiedChannel()` 都按分组内 `abilities` 排序。

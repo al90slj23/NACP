@@ -33,6 +33,10 @@ type ChannelHealthConfig struct {
 	// ProbeTimeout: max time for a single lightweight probe HTTP request
 	ProbeTimeout time.Duration // default: 3 seconds
 
+	// FirstByteTimeout: max wait for one real upstream attempt to return its
+	// first byte/response headers. It does not limit the full streaming body.
+	FirstByteTimeout time.Duration // default: 20 seconds
+
 	// MaxRetrySamePriority: max different channels to try at the same priority level
 	MaxRetrySamePriority int // default: 3
 
@@ -43,9 +47,10 @@ type ChannelHealthConfig struct {
 	LowChannelWarningThreshold int // default: 2
 
 	// TotalRetryTimeout: max wall-clock time for SFT retry orchestration after
-	// NACP receives the relay request. It limits additional retry/probe waits;
-	// an already-running upstream request is not interrupted by this guard.
-	TotalRetryTimeout time.Duration // default: 30 seconds
+	// NACP receives the relay request. It is enforced as a first-byte deadline
+	// across retry attempts, and does not limit the full streaming body after a
+	// successful upstream response has started.
+	TotalRetryTimeout time.Duration // default: 60 seconds
 }
 
 // DefaultHealthConfig returns the default configuration with sensible defaults.
@@ -58,10 +63,11 @@ func DefaultHealthConfig() *ChannelHealthConfig {
 		RecoveryObservationPeriod:  10 * time.Minute,
 		RecoveryFailTolerance:      0,
 		ProbeTimeout:               3 * time.Second,
+		FirstByteTimeout:           20 * time.Second,
 		MaxRetrySamePriority:       3,
 		PreWarmChannelCount:        2,
 		LowChannelWarningThreshold: 2,
-		TotalRetryTimeout:          30 * time.Second,
+		TotalRetryTimeout:          60 * time.Second,
 	}
 }
 

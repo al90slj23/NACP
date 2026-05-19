@@ -36,7 +36,9 @@
 5. `/api/log/trace` 返回完整子步骤，按 `trace_seq -> trace_sibling_seq -> id` 排序。
 6. `/console/log` 日志类型筛选已补充 `20/21/29/50/51/52/59`。
 7. 新增 `ContextKeyRelayReceivedAt`，SFT 计时起点前移到 NACP 接收到请求时。
-8. SFT 总重试调度窗口默认 30 秒，超时后停止后续调度，并用最后一次正式请求错误收尾。
+8. SFT 总重试调度窗口当时默认 30 秒，超时后停止后续调度，并用最后一次正式请求错误收尾。
+
+后续更新：2026-05-19 已将该规则升级为首字硬预算，默认总预算 60 秒、单渠道首字 20 秒。详见 `.ai/L4#Changelog/2026-05-19-sft-first-byte-timeout-budget.md`。
 
 ## 验证
 

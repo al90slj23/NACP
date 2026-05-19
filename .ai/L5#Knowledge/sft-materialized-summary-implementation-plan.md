@@ -84,10 +84,14 @@ now - relay_received_at >= sft_total_timeout
 当前实现边界：
 
 ```text
-默认 TotalRetryTimeout = 30s
-已限制后续同渠道重试、预热探测等待、备用渠道正式请求调度
-暂不强行中断已经发出的正式上游请求
+默认 TotalRetryTimeout = 60s
+默认 FirstByteTimeout = 20s
+每次正式请求首字等待 = min(FirstByteTimeout, TotalRetryTimeout 剩余时间)
+已对普通 HTTP relay 和 AWS relay 注入首字等待 context
+首字到达后不限制完整流式输出
 ```
+
+`RELAY_TIMEOUT` 保留为 NewAPI 原生 HTTP client 全局生命周期超时，默认 `0` 表示关闭。它覆盖完整请求生命周期，可能包含完整流式输出，因此不是 SFT 首字超时的替代方案。
 
 ## 6. 生成流程
 
@@ -189,7 +193,7 @@ type = 50
 | 前端筛选 | 增加 `20/21/29/50/51/52/59` 类型入口 |
 | 前端兼容 | 仅在“全部类型”时保留过渡期前端聚合；显式筛选子类型时直接展示子行 |
 | 计时起点 | 新增 `ContextKeyRelayReceivedAt`，`RelayInfo.StartTime` 优先使用入口时间 |
-| SFT 总窗口 | 默认 30 秒，超时后停止后续调度并用最后一次正式请求错误收尾 |
+| SFT 总窗口 | 默认 60 秒，从 NACP 接收到 relay 请求开始计算；每次正式请求首字等待为 `min(20s, 总剩余时间)` |
 
 待继续增强：
 
@@ -197,5 +201,5 @@ type = 50
 |---|---|
 | `trace_parent_id/trace_sibling_seq` 精准父子结构 | 当前仍主要靠 `trace_seq` 线性顺序 |
 | 摘要一致性后台复核 | 防止终态已写但摘要写失败、异步 probe 后到导致摘要统计过期 |
-| 总超时强中断上游请求 | 需要把 deadline 注入请求 context，并单独验证流式和长响应 |
+| 流式完整输出时长限制 | SFT 当前只限制首字；完整流式输出继续由原有流式扫描/保活/流式超时机制处理 |
 | 平台探测运营消耗统计页 | 已有 `29` 数据基础，统计入口仍需单独设计 |

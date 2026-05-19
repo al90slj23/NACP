@@ -40,15 +40,25 @@ func getAwsErrorStatusCode(err error) int {
 	return http.StatusInternalServerError
 }
 
-func newAwsInvokeContext(c *gin.Context) (context.Context, context.CancelFunc) {
+func newAwsInvokeContext(c *gin.Context) (context.Context, context.CancelFunc, *service.FirstByteTimeoutGuard) {
 	parent := context.Background()
 	if c != nil && c.Request != nil {
 		parent = c.Request.Context()
 	}
+	var relayCancel context.CancelFunc
 	if common.RelayTimeout <= 0 {
-		return parent, func() {}
+		relayCancel = func() {}
+	} else {
+		parent, relayCancel = context.WithTimeout(parent, time.Duration(common.RelayTimeout)*time.Second)
 	}
-	return context.WithTimeout(parent, time.Duration(common.RelayTimeout)*time.Second)
+	ctx, firstByteGuard := service.NewSFTFirstByteTimeoutContext(c, parent, service.GetHealthConfig())
+	cancel := func() {
+		if firstByteGuard != nil {
+			firstByteGuard.Cancel()
+		}
+		relayCancel()
+	}
+	return ctx, cancel, firstByteGuard
 }
 
 func newAwsClient(c *gin.Context, info *relaycommon.RelayInfo) (*bedrockruntime.Client, error) {
@@ -227,11 +237,17 @@ func getAwsModelID(requestModel string) string {
 
 func awsHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (*types.NewAPIError, *dto.Usage) {
 
-	ctx, cancel := newAwsInvokeContext(c)
+	ctx, cancel, firstByteGuard := newAwsInvokeContext(c)
 	defer cancel()
 
 	awsResp, err := a.AwsClient.InvokeModel(ctx, a.AwsReq.(*bedrockruntime.InvokeModelInput))
+	if firstByteGuard != nil {
+		firstByteGuard.StopFirstByteTimer()
+	}
 	if err != nil {
+		if firstByteGuard != nil && firstByteGuard.TimedOut() {
+			return service.NewSFTFirstByteTimeoutError(firstByteGuard.Timeout()), nil
+		}
 		statusCode := getAwsErrorStatusCode(err)
 		return types.NewOpenAIError(errors.Wrap(err, "InvokeModel"), types.ErrorCodeAwsInvokeError, statusCode), nil
 	}
@@ -257,11 +273,17 @@ func awsHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (*types
 }
 
 func awsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (*types.NewAPIError, *dto.Usage) {
-	ctx, cancel := newAwsInvokeContext(c)
+	ctx, cancel, firstByteGuard := newAwsInvokeContext(c)
 	defer cancel()
 
 	awsResp, err := a.AwsClient.InvokeModelWithResponseStream(ctx, a.AwsReq.(*bedrockruntime.InvokeModelWithResponseStreamInput))
+	if firstByteGuard != nil {
+		firstByteGuard.StopFirstByteTimer()
+	}
 	if err != nil {
+		if firstByteGuard != nil && firstByteGuard.TimedOut() {
+			return service.NewSFTFirstByteTimeoutError(firstByteGuard.Timeout()), nil
+		}
 		statusCode := getAwsErrorStatusCode(err)
 		return types.NewOpenAIError(errors.Wrap(err, "InvokeModelWithResponseStream"), types.ErrorCodeAwsInvokeError, statusCode), nil
 	}
@@ -300,11 +322,17 @@ func awsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (
 // Nova模型处理函数
 func handleNovaRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (*types.NewAPIError, *dto.Usage) {
 
-	ctx, cancel := newAwsInvokeContext(c)
+	ctx, cancel, firstByteGuard := newAwsInvokeContext(c)
 	defer cancel()
 
 	awsResp, err := a.AwsClient.InvokeModel(ctx, a.AwsReq.(*bedrockruntime.InvokeModelInput))
+	if firstByteGuard != nil {
+		firstByteGuard.StopFirstByteTimer()
+	}
 	if err != nil {
+		if firstByteGuard != nil && firstByteGuard.TimedOut() {
+			return service.NewSFTFirstByteTimeoutError(firstByteGuard.Timeout()), nil
+		}
 		statusCode := getAwsErrorStatusCode(err)
 		return types.NewOpenAIError(errors.Wrap(err, "InvokeModel"), types.ErrorCodeAwsInvokeError, statusCode), nil
 	}
